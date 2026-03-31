@@ -1,0 +1,228 @@
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import Database from "better-sqlite3";
+import path from "path";
+import { fileURLToPath } from "url";
+import {
+  projects, pipeline, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
+} from "@shared/schema";
+import type {
+  Project, InsertProject,
+  PipelineDeal, InsertPipeline,
+  ArmLoan, InsertArmLoan,
+  CashFlowEntry, InsertCashFlow,
+  Contact, InsertContact,
+  Investor, InsertInvestor,
+  Document, InsertDocument,
+  Task, InsertTask,
+  UnderwritingDeal, InsertUnderwriting,
+} from "@shared/schema";
+import { eq } from "drizzle-orm";
+
+// Use absolute path for DB so it works regardless of working directory
+const DB_PATH = process.env.DB_PATH ||
+  path.join(process.cwd(), "data.db");
+console.log("[db] using database at:", DB_PATH);
+const sqlite = new Database(DB_PATH);
+sqlite.pragma("journal_mode = WAL");
+const db = drizzle(sqlite);
+
+// Auto-create tables on first run (no manual db:push needed on Railway)
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, address TEXT NOT NULL, type TEXT NOT NULL,
+    status TEXT NOT NULL, total_budget REAL NOT NULL, spent_to_date REAL NOT NULL DEFAULT 0,
+    projected_noi REAL, units INTEGER, sqft INTEGER,
+    start_date TEXT NOT NULL, expected_completion TEXT, equity REAL, notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS pipeline (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, address TEXT NOT NULL, type TEXT NOT NULL, stage TEXT NOT NULL,
+    asking_price REAL, projected_value REAL, cap_rate REAL, units INTEGER, sqft INTEGER,
+    probability INTEGER NOT NULL DEFAULT 50, target_close_date TEXT, broker TEXT, notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS arm_loans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    loan_name TEXT NOT NULL, project_id INTEGER, lender TEXT NOT NULL,
+    original_balance REAL NOT NULL, current_balance REAL NOT NULL,
+    current_rate REAL NOT NULL, index_type TEXT NOT NULL,
+    margin REAL NOT NULL DEFAULT 0, current_index REAL NOT NULL DEFAULT 0,
+    cap REAL, floor REAL, next_reset_date TEXT, maturity_date TEXT NOT NULL,
+    monthly_payment REAL, loan_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active', notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS cash_flow (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL, month TEXT NOT NULL, category TEXT NOT NULL,
+    subcategory TEXT NOT NULL, amount REAL NOT NULL, notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, company TEXT, role TEXT NOT NULL,
+    email TEXT, phone TEXT, project_ids TEXT, notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS investors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, entity_name TEXT, contact_id INTEGER, project_id INTEGER NOT NULL,
+    commitment REAL NOT NULL, funded REAL NOT NULL DEFAULT 0,
+    preferred_return REAL NOT NULL DEFAULT 8, equity_share REAL NOT NULL,
+    total_distributed REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+    close_date TEXT, notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER, name TEXT NOT NULL, category TEXT NOT NULL,
+    url TEXT, notes TEXT, uploaded_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL, description TEXT, project_id INTEGER,
+    priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'open',
+    due_date TEXT, reminder_date TEXT, assigned_to TEXT, category TEXT,
+    completed_at TEXT, created_at TEXT NOT NULL, notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS underwriting (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, deal_type TEXT NOT NULL, address TEXT, created_at TEXT NOT NULL,
+    purchase_price REAL NOT NULL DEFAULT 0, closing_costs REAL NOT NULL DEFAULT 0,
+    renovation_budget REAL NOT NULL DEFAULT 0, equity_in REAL NOT NULL DEFAULT 0,
+    gross_potential_rent REAL NOT NULL DEFAULT 0, vacancy_rate REAL NOT NULL DEFAULT 5,
+    other_income REAL NOT NULL DEFAULT 0, operating_expenses REAL NOT NULL DEFAULT 0,
+    management_fee_rate REAL NOT NULL DEFAULT 8, capex_reserve REAL NOT NULL DEFAULT 0,
+    loan_amount REAL NOT NULL DEFAULT 0, interest_rate REAL NOT NULL DEFAULT 7,
+    amortization_years INTEGER NOT NULL DEFAULT 30, interest_only INTEGER NOT NULL DEFAULT 0,
+    io_years INTEGER NOT NULL DEFAULT 0, hold_years INTEGER NOT NULL DEFAULT 5,
+    rent_growth_rate REAL NOT NULL DEFAULT 3, expense_growth_rate REAL NOT NULL DEFAULT 2,
+    exit_cap_rate REAL NOT NULL DEFAULT 5.5, selling_costs REAL NOT NULL DEFAULT 2,
+    preferred_return REAL NOT NULL DEFAULT 8, notes TEXT
+  );
+`);
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface IStorage {
+  // Projects
+  getProjects(): Project[];
+  getProject(id: number): Project | undefined;
+  createProject(data: InsertProject): Project;
+  updateProject(id: number, data: Partial<InsertProject>): Project | undefined;
+  deleteProject(id: number): void;
+  // Pipeline
+  getPipeline(): PipelineDeal[];
+  getPipelineDeal(id: number): PipelineDeal | undefined;
+  createPipelineDeal(data: InsertPipeline): PipelineDeal;
+  updatePipelineDeal(id: number, data: Partial<InsertPipeline>): PipelineDeal | undefined;
+  deletePipelineDeal(id: number): void;
+  // ARM
+  getArmLoans(): ArmLoan[];
+  getArmLoan(id: number): ArmLoan | undefined;
+  createArmLoan(data: InsertArmLoan): ArmLoan;
+  updateArmLoan(id: number, data: Partial<InsertArmLoan>): ArmLoan | undefined;
+  deleteArmLoan(id: number): void;
+  // Cash Flow
+  getCashFlow(projectId?: number): CashFlowEntry[];
+  createCashFlowEntry(data: InsertCashFlow): CashFlowEntry;
+  updateCashFlowEntry(id: number, data: Partial<InsertCashFlow>): CashFlowEntry | undefined;
+  deleteCashFlowEntry(id: number): void;
+  // Contacts
+  getContacts(): Contact[];
+  createContact(data: InsertContact): Contact;
+  updateContact(id: number, data: Partial<InsertContact>): Contact | undefined;
+  deleteContact(id: number): void;
+  // Investors
+  getInvestors(projectId?: number): Investor[];
+  createInvestor(data: InsertInvestor): Investor;
+  updateInvestor(id: number, data: Partial<InsertInvestor>): Investor | undefined;
+  deleteInvestor(id: number): void;
+  // Documents
+  getDocuments(projectId?: number): Document[];
+  createDocument(data: InsertDocument): Document;
+  updateDocument(id: number, data: Partial<InsertDocument>): Document | undefined;
+  deleteDocument(id: number): void;
+  // Tasks
+  getTasks(status?: string): Task[];
+  getTask(id: number): Task | undefined;
+  createTask(data: InsertTask): Task;
+  updateTask(id: number, data: Partial<InsertTask>): Task | undefined;
+  deleteTask(id: number): void;
+  // Underwriting
+  getUnderwritingDeals(): UnderwritingDeal[];
+  getUnderwritingDeal(id: number): UnderwritingDeal | undefined;
+  createUnderwritingDeal(data: InsertUnderwriting): UnderwritingDeal;
+  updateUnderwritingDeal(id: number, data: Partial<InsertUnderwriting>): UnderwritingDeal | undefined;
+  deleteUnderwritingDeal(id: number): void;
+}
+
+export class DatabaseStorage implements IStorage {
+  // Projects
+  getProjects() { return db.select().from(projects).all(); }
+  getProject(id: number) { return db.select().from(projects).where(eq(projects.id, id)).get(); }
+  createProject(data: InsertProject) { return db.insert(projects).values(data).returning().get(); }
+  updateProject(id: number, data: Partial<InsertProject>) { return db.update(projects).set(data).where(eq(projects.id, id)).returning().get(); }
+  deleteProject(id: number) { db.delete(projects).where(eq(projects.id, id)).run(); }
+
+  // Pipeline
+  getPipeline() { return db.select().from(pipeline).all(); }
+  getPipelineDeal(id: number) { return db.select().from(pipeline).where(eq(pipeline.id, id)).get(); }
+  createPipelineDeal(data: InsertPipeline) { return db.insert(pipeline).values(data).returning().get(); }
+  updatePipelineDeal(id: number, data: Partial<InsertPipeline>) { return db.update(pipeline).set(data).where(eq(pipeline.id, id)).returning().get(); }
+  deletePipelineDeal(id: number) { db.delete(pipeline).where(eq(pipeline.id, id)).run(); }
+
+  // ARM
+  getArmLoans() { return db.select().from(armLoans).all(); }
+  getArmLoan(id: number) { return db.select().from(armLoans).where(eq(armLoans.id, id)).get(); }
+  createArmLoan(data: InsertArmLoan) { return db.insert(armLoans).values(data).returning().get(); }
+  updateArmLoan(id: number, data: Partial<InsertArmLoan>) { return db.update(armLoans).set(data).where(eq(armLoans.id, id)).returning().get(); }
+  deleteArmLoan(id: number) { db.delete(armLoans).where(eq(armLoans.id, id)).run(); }
+
+  // Cash Flow
+  getCashFlow(projectId?: number) {
+    if (projectId != null) return db.select().from(cashFlow).where(eq(cashFlow.projectId, projectId)).all();
+    return db.select().from(cashFlow).all();
+  }
+  createCashFlowEntry(data: InsertCashFlow) { return db.insert(cashFlow).values(data).returning().get(); }
+  updateCashFlowEntry(id: number, data: Partial<InsertCashFlow>) { return db.update(cashFlow).set(data).where(eq(cashFlow.id, id)).returning().get(); }
+  deleteCashFlowEntry(id: number) { db.delete(cashFlow).where(eq(cashFlow.id, id)).run(); }
+
+  // Contacts
+  getContacts() { return db.select().from(contacts).all(); }
+  createContact(data: InsertContact) { return db.insert(contacts).values(data).returning().get(); }
+  updateContact(id: number, data: Partial<InsertContact>) { return db.update(contacts).set(data).where(eq(contacts.id, id)).returning().get(); }
+  deleteContact(id: number) { db.delete(contacts).where(eq(contacts.id, id)).run(); }
+
+  // Investors
+  getInvestors(projectId?: number) {
+    if (projectId != null) return db.select().from(investors).where(eq(investors.projectId, projectId)).all();
+    return db.select().from(investors).all();
+  }
+  createInvestor(data: InsertInvestor) { return db.insert(investors).values(data).returning().get(); }
+  updateInvestor(id: number, data: Partial<InsertInvestor>) { return db.update(investors).set(data).where(eq(investors.id, id)).returning().get(); }
+  deleteInvestor(id: number) { db.delete(investors).where(eq(investors.id, id)).run(); }
+
+  // Documents
+  getDocuments(projectId?: number) {
+    if (projectId != null) return db.select().from(documents).where(eq(documents.projectId, projectId)).all();
+    return db.select().from(documents).all();
+  }
+  createDocument(data: InsertDocument) { return db.insert(documents).values(data).returning().get(); }
+  updateDocument(id: number, data: Partial<InsertDocument>) { return db.update(documents).set(data).where(eq(documents.id, id)).returning().get(); }
+  deleteDocument(id: number) { db.delete(documents).where(eq(documents.id, id)).run(); }
+
+  // Tasks
+  getTasks(status?: string) {
+    if (status) return db.select().from(tasks).where(eq(tasks.status, status)).all();
+    return db.select().from(tasks).all();
+  }
+  getTask(id: number) { return db.select().from(tasks).where(eq(tasks.id, id)).get(); }
+  createTask(data: InsertTask) { return db.insert(tasks).values(data).returning().get(); }
+  updateTask(id: number, data: Partial<InsertTask>) { return db.update(tasks).set(data).where(eq(tasks.id, id)).returning().get(); }
+  deleteTask(id: number) { db.delete(tasks).where(eq(tasks.id, id)).run(); }
+
+  // Underwriting
+  getUnderwritingDeals() { return db.select().from(underwriting).all(); }
+  getUnderwritingDeal(id: number) { return db.select().from(underwriting).where(eq(underwriting.id, id)).get(); }
+  createUnderwritingDeal(data: InsertUnderwriting) { return db.insert(underwriting).values(data).returning().get(); }
+  updateUnderwritingDeal(id: number, data: Partial<InsertUnderwriting>) { return db.update(underwriting).set(data).where(eq(underwriting.id, id)).returning().get(); }
+  deleteUnderwritingDeal(id: number) { db.delete(underwriting).where(eq(underwriting.id, id)).run(); }
+}
+
+export const storage = new DatabaseStorage();
