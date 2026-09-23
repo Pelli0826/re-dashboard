@@ -25,26 +25,85 @@ export type InsertProject = z.infer<typeof insertProjectSchema>;
 export type Project = typeof projects.$inferSelect;
 
 // ─── Pipeline Deals ────────────────────────────────────────────────────────
-export const pipeline = sqliteTable("pipeline", {
+// Stored in the "deals" table. Vocabulary (stages, types, etc.) lives in shared/pipeline.ts.
+export const pipeline = sqliteTable("deals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  dealCode: text("deal_code").notNull(),            // e.g. D-2026-001, assigned by server
   name: text("name").notNull(),
-  address: text("address").notNull(),
+  address: text("address").notNull().default(""),
+  municipality: text("municipality"),
+  county: text("county"),
+  state: text("state"),
   type: text("type").notNull(),
   stage: text("stage").notNull(),
+  deadReason: text("dead_reason"),
+
+  // Source & context
+  source: text("source"),
+  brokerContactId: integer("broker_contact_id"),
+  sellerName: text("seller_name"),
+  temperature: text("temperature").notNull().default("warm"),
+  competition: text("competition"),
+  sellerMotivation: text("seller_motivation"),
+  reasonForSale: text("reason_for_sale"),
+
+  // Pricing & financials
   askingPrice: real("asking_price"),
-  projectedValue: real("projected_value"),
+  priceNotes: text("price_notes"),                   // e.g. "Priced by use and density"
+  offerPrice: real("offer_price"),
+  noi: real("noi"),
   capRate: real("cap_rate"),
+  projectedValue: real("projected_value"),
+  probabilityOverride: integer("probability_override"),
+
+  // Property
   units: integer("units"),
   sqft: integer("sqft"),
-  probability: integer("probability").notNull().default(50),
-  targetCloseDate: text("target_close_date"),
-  broker: text("broker"),
+  acres: real("acres"),
+  yearBuilt: integer("year_built"),
+  occupancy: real("occupancy"),
+  zoning: text("zoning"),
+  floodZone: text("flood_zone"),
+  utilities: text("utilities"),
+  groundLease: integer("ground_lease").notNull().default(0),
+  keyRisks: text("key_risks"),
+  scenarios: text("scenarios"),                       // JSON array of DevelopmentScenario
+
+  // Dates (YYYY-MM-DD)
+  firstContactDate: text("first_contact_date"),
+  loiDate: text("loi_date"),
+  loiExpiration: text("loi_expiration"),
+  contractDate: text("contract_date"),
+  ddEndDate: text("dd_end_date"),
+  closingDate: text("closing_date"),
+
+  // System timestamps (ISO)
+  stageChangedAt: text("stage_changed_at").notNull(),
+  lastActivityAt: text("last_activity_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
   notes: text("notes"),
 });
 
-export const insertPipelineSchema = createInsertSchema(pipeline).omit({ id: true });
+export const insertPipelineSchema = createInsertSchema(pipeline).omit({
+  id: true, dealCode: true, stageChangedAt: true, lastActivityAt: true, createdAt: true, updatedAt: true,
+});
 export type InsertPipeline = z.infer<typeof insertPipelineSchema>;
 export type PipelineDeal = typeof pipeline.$inferSelect;
+
+// ─── Deal Activity Log ─────────────────────────────────────────────────────
+export const dealActivity = sqliteTable("deal_activity", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealId: integer("deal_id").notNull(),
+  date: text("date").notNull(),                      // YYYY-MM-DD the touchpoint happened
+  kind: text("kind").notNull(),                      // call | email | meeting | site-visit | note | stage-change | created
+  summary: text("summary").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertDealActivitySchema = createInsertSchema(dealActivity).omit({ id: true, dealId: true, createdAt: true });
+export type InsertDealActivity = z.infer<typeof insertDealActivitySchema>;
+export type DealActivity = typeof dealActivity.$inferSelect;
 
 // ─── ARM Loans ─────────────────────────────────────────────────────────────
 export const armLoans = sqliteTable("arm_loans", {
@@ -145,6 +204,7 @@ export const tasks = sqliteTable("tasks", {
   title: text("title").notNull(),
   description: text("description"),
   projectId: integer("project_id"),          // optional link to a project
+  dealId: integer("deal_id"),                // optional link to a pipeline deal
   priority: text("priority").notNull().default("medium"), // low | medium | high | urgent
   status: text("status").notNull().default("open"),       // open | in-progress | done
   dueDate: text("due_date"),                 // YYYY-MM-DD

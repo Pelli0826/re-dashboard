@@ -19,7 +19,7 @@ import NotFound from "./pages/not-found";
 import { Loader2 } from "lucide-react";
 
 function AppInner() {
-  const { data, isLoading, refetch } = useQuery<{ authenticated: boolean; passwordRequired: boolean }>({
+  const { data, isLoading, refetch } = useQuery<{ authenticated: boolean; passwordRequired: boolean; locked?: boolean }>({
     queryKey: ["/api/auth/check"],
     retry: false,
     staleTime: 1000 * 60 * 5,
@@ -32,7 +32,7 @@ function AppInner() {
   );
 
   if (data?.passwordRequired && !data?.authenticated) {
-    return <Login onLogin={() => refetch()} />;
+    return <Login locked={!!data.locked} onLogin={() => refetch()} />;
   }
 
   return (

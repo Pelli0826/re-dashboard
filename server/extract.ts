@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import pdfParse from "pdf-parse";
+import { PDFParse } from "pdf-parse";
 import { fromBuffer } from "pdf2pic";
 
 // Lazy init — only create client when a request actually comes in
@@ -144,8 +144,15 @@ export async function extractFromPdf(buffer: Buffer, docType: DocType): Promise<
   } catch (visionErr: any) {
     // Strategy 2: Fallback to text extraction for text-based PDFs
     try {
-      const parsed = await pdfParse(buffer);
-      const text = parsed.text.slice(0, 20000);
+      // pdf-parse v2 API (the old default-export call no longer exists)
+      const parser = new PDFParse({ data: buffer });
+      let fullText = "";
+      try {
+        fullText = (await parser.getText()).text;
+      } finally {
+        await parser.destroy();
+      }
+      const text = fullText.slice(0, 20000);
       if (!text || text.trim().length < 50) {
         throw new Error("PDF appears to be empty or unreadable.");
       }

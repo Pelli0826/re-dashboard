@@ -5,7 +5,7 @@ import type { Task } from "@shared/schema";
 import {
   LayoutDashboard, FolderKanban, TrendingUp, BadgeDollarSign,
   LineChart, Users, UserCheck, FileText, CheckSquare, Calculator,
-  ChevronLeft, ChevronRight, Sun, Moon, Building2, LogOut
+  ChevronLeft, ChevronRight, Sun, Moon, Building2, LogOut, Download, AlertTriangle
 } from "lucide-react";
 import PerplexityAttribution from "./PerplexityAttribution";
 
@@ -41,6 +41,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     [allTasks, today]
   );
   const badgeCount = Math.max(reminderCount, overdueCount);
+  const { data: system } = useQuery<{ persistentStorage: boolean }>({ queryKey: ["/api/system"] });
 
   function toggleTheme() {
     const next = !dark;
@@ -115,6 +116,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           >
             {dark ? <Sun size={15} /> : <Moon size={15} />}
           </button>
+          <a
+            href="/api/backup"
+            download
+            aria-label="Download backup"
+            title="Download a backup of all data"
+            className="p-2 rounded-md hover:bg-sidebar-accent transition-colors text-sidebar-foreground opacity-70 hover:opacity-100"
+          >
+            <Download size={15} />
+          </a>
           <button
             onClick={async () => { await fetch("/api/auth/logout", { method: "POST" }); window.location.reload(); }}
             aria-label="Sign out"
@@ -145,6 +155,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main className="flex-1 overflow-y-auto p-6 overscroll-contain">
+          {system && !system.persistentStorage && (
+            <div role="alert" className="mb-4 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-800 px-4 py-3 text-sm text-red-800 dark:text-red-300">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <span>Storage is temporary: anything entered will be erased on the next deploy. Attach a Railway volume to this service, then redeploy.</span>
+            </div>
+          )}
           {children}
           <div className="mt-8 pt-4 border-t border-border">
             <PerplexityAttribution />

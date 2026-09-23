@@ -63,7 +63,7 @@ const PRIORITY_CFG: Record<string, { label: string; cls: string; dot: string }> 
 };
 
 const STATUS_ORDER = ["open", "in-progress", "done"] as const;
-const CATEGORIES = ["general", "permit", "closing", "finance", "legal", "construction"];
+const CATEGORIES = ["general", "due-diligence", "permit", "closing", "finance", "legal", "construction"];
 
 // ── form schema ────────────────────────────────────────────────────────────
 const formSchema = insertTaskSchema.extend({

@@ -1,13 +1,14 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
+import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import {
-  projects, pipeline, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
+  projects, pipeline, dealActivity, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
 } from "@shared/schema";
 import type {
   Project, InsertProject,
   PipelineDeal, InsertPipeline,
+  DealActivity,
   ArmLoan, InsertArmLoan,
   CashFlowEntry, InsertCashFlow,
   Contact, InsertContact,
@@ -16,12 +17,23 @@ import type {
   Task, InsertTask,
   UnderwritingDeal, InsertUnderwriting,
 } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { eq, desc, like } from "drizzle-orm";
 
-// Use absolute path for DB so it works regardless of working directory
-const DB_PATH = process.env.DB_PATH ||
-  path.join(process.cwd(), "data.db");
+// ── Where the database lives ──────────────────────────────────────────────
+// Priority: DB_PATH env var → Railway volume (auto-detected) → project folder.
+// On Railway, anything outside a volume is wiped on every redeploy.
+const volumeDir = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+export const DATA_DIR = process.env.DB_PATH
+  ? path.dirname(process.env.DB_PATH)
+  : volumeDir || process.cwd();
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "data.db");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+export const DB_IS_PERSISTENT = Boolean(process.env.DB_PATH || volumeDir) || process.env.NODE_ENV !== "production";
 console.log("[db] using database at:", DB_PATH);
+if (!DB_IS_PERSISTENT) {
+  console.warn("[db] WARNING: no Railway volume or DB_PATH detected. Data will be lost on the next deploy.");
+}
 const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 const db = drizzle(sqlite);
@@ -35,12 +47,29 @@ sqlite.exec(`
     projected_noi REAL, units INTEGER, sqft INTEGER,
     start_date TEXT NOT NULL, expected_completion TEXT, equity REAL, notes TEXT
   );
-  CREATE TABLE IF NOT EXISTS pipeline (
+  CREATE TABLE IF NOT EXISTS deals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL, address TEXT NOT NULL, type TEXT NOT NULL, stage TEXT NOT NULL,
-    asking_price REAL, projected_value REAL, cap_rate REAL, units INTEGER, sqft INTEGER,
-    probability INTEGER NOT NULL DEFAULT 50, target_close_date TEXT, broker TEXT, notes TEXT
+    deal_code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '',
+    municipality TEXT, county TEXT, state TEXT,
+    type TEXT NOT NULL, stage TEXT NOT NULL, dead_reason TEXT,
+    source TEXT, broker_contact_id INTEGER, seller_name TEXT,
+    temperature TEXT NOT NULL DEFAULT 'warm', competition TEXT, seller_motivation TEXT, reason_for_sale TEXT,
+    asking_price REAL, price_notes TEXT, offer_price REAL, noi REAL, cap_rate REAL,
+    projected_value REAL, probability_override INTEGER,
+    units INTEGER, sqft INTEGER, acres REAL, year_built INTEGER, occupancy REAL,
+    zoning TEXT, flood_zone TEXT, utilities TEXT, ground_lease INTEGER NOT NULL DEFAULT 0,
+    key_risks TEXT, scenarios TEXT,
+    first_contact_date TEXT, loi_date TEXT, loi_expiration TEXT, contract_date TEXT,
+    dd_end_date TEXT, closing_date TEXT,
+    stage_changed_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, notes TEXT
   );
+  CREATE TABLE IF NOT EXISTS deal_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER NOT NULL, date TEXT NOT NULL, kind TEXT NOT NULL,
+    summary TEXT NOT NULL, created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_deal_activity_deal ON deal_activity(deal_id);
   CREATE TABLE IF NOT EXISTS arm_loans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     loan_name TEXT NOT NULL, project_id INTEGER, lender TEXT NOT NULL,
@@ -97,6 +126,16 @@ sqlite.exec(`
     preferred_return REAL NOT NULL DEFAULT 8, notes TEXT
   );
 `);
+
+// ── Lightweight migrations for databases created by older versions ───────
+function addColumnIfMissing(table: string, column: string, ddl: string) {
+  const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some(c => c.name === column)) {
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    console.log(`[db] migrated: added ${table}.${column}`);
+  }
+}
+addColumnIfMissing("tasks", "deal_id", "deal_id INTEGER");
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface IStorage {
@@ -110,8 +149,11 @@ export interface IStorage {
   getPipeline(): PipelineDeal[];
   getPipelineDeal(id: number): PipelineDeal | undefined;
   createPipelineDeal(data: InsertPipeline): PipelineDeal;
-  updatePipelineDeal(id: number, data: Partial<InsertPipeline>): PipelineDeal | undefined;
+  updatePipelineDeal(id: number, data: Partial<PipelineDeal>): PipelineDeal | undefined;
   deletePipelineDeal(id: number): void;
+  nextDealCode(): string;
+  getDealActivity(dealId: number): DealActivity[];
+  addDealActivity(dealId: number, date: string, kind: string, summary: string): DealActivity;
   // ARM
   getArmLoans(): ArmLoan[];
   getArmLoan(id: number): ArmLoan | undefined;
@@ -163,9 +205,48 @@ export class DatabaseStorage implements IStorage {
   // Pipeline
   getPipeline() { return db.select().from(pipeline).all(); }
   getPipelineDeal(id: number) { return db.select().from(pipeline).where(eq(pipeline.id, id)).get(); }
-  createPipelineDeal(data: InsertPipeline) { return db.insert(pipeline).values(data).returning().get(); }
-  updatePipelineDeal(id: number, data: Partial<InsertPipeline>) { return db.update(pipeline).set(data).where(eq(pipeline.id, id)).returning().get(); }
-  deletePipelineDeal(id: number) { db.delete(pipeline).where(eq(pipeline.id, id)).run(); }
+  createPipelineDeal(data: InsertPipeline) {
+    const now = new Date().toISOString();
+    return db.insert(pipeline).values({
+      ...data,
+      dealCode: this.nextDealCode(),
+      stageChangedAt: now, lastActivityAt: now, createdAt: now, updatedAt: now,
+    }).returning().get();
+  }
+  updatePipelineDeal(id: number, data: Partial<PipelineDeal>) {
+    return db.update(pipeline).set({ ...data, updatedAt: new Date().toISOString() }).where(eq(pipeline.id, id)).returning().get();
+  }
+  deletePipelineDeal(id: number) {
+    sqlite.transaction(() => {
+      db.delete(dealActivity).where(eq(dealActivity.dealId, id)).run();
+      db.update(tasks).set({ dealId: null }).where(eq(tasks.dealId, id)).run();
+      db.delete(pipeline).where(eq(pipeline.id, id)).run();
+    })();
+  }
+  nextDealCode() {
+    const prefix = `D-${new Date().getFullYear()}-`;
+    const rows = db.select({ code: pipeline.dealCode }).from(pipeline).where(like(pipeline.dealCode, `${prefix}%`)).all();
+    const max = rows.reduce((m, r) => Math.max(m, parseInt(r.code.slice(prefix.length), 10) || 0), 0);
+    return `${prefix}${String(max + 1).padStart(3, "0")}`;
+  }
+  getDealActivity(dealId: number) {
+    return db.select().from(dealActivity).where(eq(dealActivity.dealId, dealId))
+      .orderBy(desc(dealActivity.date), desc(dealActivity.id)).all();
+  }
+  addDealActivity(dealId: number, date: string, kind: string, summary: string) {
+    const now = new Date().toISOString();
+    const row = db.insert(dealActivity).values({ dealId, date, kind, summary, createdAt: now }).returning().get();
+    db.update(pipeline).set({ lastActivityAt: now }).where(eq(pipeline.id, dealId)).run();
+    return row;
+  }
+  // Full export of every table, for the Download backup button.
+  exportAll() {
+    const tables = ["projects", "deals", "deal_activity", "arm_loans", "cash_flow", "contacts",
+      "investors", "documents", "tasks", "underwriting"];
+    const out: Record<string, unknown[]> = {};
+    for (const t of tables) out[t] = sqlite.prepare(`SELECT * FROM ${t}`).all();
+    return out;
+  }
 
   // ARM
   getArmLoans() { return db.select().from(armLoans).all(); }

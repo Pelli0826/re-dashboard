@@ -7,9 +7,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 
 interface LoginProps {
   onLogin: () => void;
+  locked?: boolean;
 }
 
-export default function Login({ onLogin }: LoginProps) {
+export default function Login({ onLogin, locked }: LoginProps) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -63,6 +64,11 @@ export default function Login({ onLogin }: LoginProps) {
             <CardDescription className="text-xs">Enter your password to access the dashboard</CardDescription>
           </CardHeader>
           <CardContent>
+            {locked && (
+              <p role="alert" className="mb-4 text-sm rounded-md bg-amber-50 dark:bg-amber-900/20 text-amber-900 dark:text-amber-200 px-3 py-2">
+                Sign-in is turned off because no password has been set. In Railway, add a DASHBOARD_PASSWORD variable to this service; it redeploys automatically.
+              </p>
+            )}
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <Label className="text-xs text-muted-foreground mb-1.5 block">Password</Label>

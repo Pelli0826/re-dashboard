@@ -1,6 +1,7 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import type { Project, PipelineDeal, ArmLoan } from "@shared/schema";
+import { STAGE_LABELS, ACTIVE_STAGES, effectiveProbability, type Stage } from "@shared/pipeline";
 import { Building2, TrendingUp, DollarSign, AlertTriangle, CheckCircle2, Clock, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -28,28 +29,19 @@ const statusColor: Record<string, string> = {
 };
 
 const pipelineStageColor: Record<string, string> = {
-  prospecting: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
+  lead: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
+  screening: "bg-slate-200 text-slate-800 dark:bg-slate-800 dark:text-slate-200",
   loi: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
   "due-diligence": "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
-  "under-contract": "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
+  closing: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
   closed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   dead: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
 };
 
 export default function Overview() {
-  const qc = useQueryClient();
   const { data: projects = [], isLoading: pLoading } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
   const { data: pipeline = [], isLoading: dLoading } = useQuery<PipelineDeal[]>({ queryKey: ["/api/pipeline"] });
   const { data: arm = [], isLoading: aLoading } = useQuery<ArmLoan[]>({ queryKey: ["/api/arm"] });
-
-  const seed = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/seed"),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/projects"] });
-      qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
-      qc.invalidateQueries({ queryKey: ["/api/arm"] });
-    },
-  });
 
   const loading = pLoading || dLoading || aLoading;
 
@@ -59,7 +51,8 @@ export default function Overview() {
   const projectedNoi = projects.reduce((s, p) => s + (p.projectedNoi ?? 0), 0);
   const totalDebt = arm.filter(l => l.status === "active").reduce((s, l) => s + l.currentBalance, 0);
   const activeProjects = projects.filter(p => !["stabilized", "disposition"].includes(p.status)).length;
-  const pipelineValue = pipeline.filter(d => d.stage !== "dead" && d.stage !== "closed").reduce((s, d) => s + (d.projectedValue ?? 0) * (d.probability / 100), 0);
+  const activeDeals = pipeline.filter(d => ACTIVE_STAGES.includes(d.stage as Stage));
+  const pipelineValue = activeDeals.reduce((s, d) => s + (d.projectedValue ?? d.offerPrice ?? d.askingPrice ?? 0) * (effectiveProbability(d) / 100), 0);
 
   const nextResets = arm
     .filter(l => l.nextResetDate && l.status === "active")
@@ -79,16 +72,11 @@ export default function Overview() {
     <div className="flex flex-col items-center justify-center h-80 gap-4 text-center">
       <Building2 size={48} className="text-muted-foreground opacity-40" />
       <p className="text-lg font-semibold text-foreground">No data yet</p>
-      <p className="text-sm text-muted-foreground">Load sample data to see the dashboard in action, or add your own projects.</p>
-      <Button
-        data-testid="button-seed"
-        onClick={() => seed.mutate()}
-        disabled={seed.isPending}
-        className="mt-2"
-      >
-        {seed.isPending ? <Loader2 className="animate-spin mr-2" size={14} /> : null}
-        Load Sample Data
-      </Button>
+      <p className="text-sm text-muted-foreground">Add your first project, or start by logging a deal in the pipeline.</p>
+      <div className="flex gap-2 mt-2">
+        <Link href="/pipeline"><Button data-testid="button-go-pipeline">Add a deal</Button></Link>
+        <Link href="/projects"><Button variant="outline">Add a project</Button></Link>
+      </div>
     </div>
   );
 
@@ -99,7 +87,7 @@ export default function Overview() {
         <KpiCard icon={<Building2 size={18} />} label="Active Projects" value={String(activeProjects)} sub={`${projects.length} total`} color="text-primary" />
         <KpiCard icon={<DollarSign size={18} />} label="Total Budget" value={fmt(totalBudget)} sub={`${fmt(totalSpent)} spent (${pct(totalSpent, totalBudget)}%)`} color="text-chart-1" />
         <KpiCard icon={<TrendingUp size={18} />} label="Projected NOI" value={fmt(projectedNoi)} sub="at stabilization" color="text-green-600 dark:text-green-400" />
-        <KpiCard icon={<DollarSign size={18} />} label="Weighted Pipeline" value={fmt(pipelineValue)} sub={`${pipeline.filter(d => d.stage !== "dead").length} active deals`} color="text-orange-500" />
+        <KpiCard icon={<DollarSign size={18} />} label="Weighted Pipeline" value={fmt(pipelineValue)} sub={`${activeDeals.length} active deals`} color="text-orange-500" />
       </div>
 
       {/* Projects + ARM grid */}
@@ -219,11 +207,11 @@ export default function Overview() {
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">Ask</th>
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium hidden md:table-cell">Proj. Value</th>
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">Probability</th>
-                  <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium hidden lg:table-cell">Close Target</th>
+                  <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium hidden lg:table-cell">Closing</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {pipeline.filter(d => d.stage !== "dead").map(d => (
+                {activeDeals.map(d => (
                   <tr key={d.id} className="hover:bg-muted/40 transition-colors">
                     <td className="px-4 py-2.5 font-medium text-foreground leading-tight">
                       <div>{d.name}</div>
@@ -231,17 +219,17 @@ export default function Overview() {
                     </td>
                     <td className="px-4 py-2.5">
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${pipelineStageColor[d.stage] ?? "bg-muted text-muted-foreground"}`}>
-                        {d.stage}
+                        {STAGE_LABELS[d.stage as Stage] ?? d.stage}
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-right font-mono">{fmt(d.askingPrice)}</td>
                     <td className="px-4 py-2.5 text-right font-mono text-green-600 dark:text-green-400 hidden md:table-cell">{fmt(d.projectedValue)}</td>
                     <td className="px-4 py-2.5 text-right">
-                      <span className={`font-mono font-semibold text-xs ${d.probability >= 70 ? "text-green-600 dark:text-green-400" : d.probability >= 40 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400"}`}>
-                        {d.probability}%
+                      <span className={`font-mono font-semibold text-xs ${effectiveProbability(d) >= 70 ? "text-green-600 dark:text-green-400" : effectiveProbability(d) >= 40 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400"}`}>
+                        {effectiveProbability(d)}%
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 text-right text-xs text-muted-foreground hidden lg:table-cell">{d.targetCloseDate ?? "—"}</td>
+                    <td className="px-4 py-2.5 text-right text-xs text-muted-foreground hidden lg:table-cell">{d.closingDate ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>
