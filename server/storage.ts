@@ -132,6 +132,16 @@ function parseIds(raw: string | null | undefined): number[] {
   try { const v = JSON.parse(raw); return Array.isArray(v) ? v.map(Number) : []; } catch { return []; }
 }
 
+// Small key/value store for app state (e.g. when the morning email last went out).
+sqlite.exec(`CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+export function getState(key: string): string | null {
+  const row = sqlite.prepare("SELECT value FROM app_state WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+export function setState(key: string, value: string): void {
+  sqlite.prepare("INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+}
+
 // ── Lightweight migrations for databases created by older versions ───────
 function addColumnIfMissing(table: string, column: string, ddl: string) {
   const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];

@@ -24,6 +24,16 @@ Overview, Projects, Pipeline (deal flow CRM), ARM Loans, Cash Flow, Investors, C
    - `DB_PATH`: optional, overrides the database location (e.g. `/data/data.db`).
 3. Deploys run automatically when you push to GitHub. Health check: `/api/health`.
 
+## Morning email
+Each morning (weekdays at 7:00 AM Eastern by default) the app emails deal deadlines due within
+3 days or overdue, overdue and due-today tasks, task reminders, and deals with no recent activity.
+It uses Resend's HTTPS API because Railway's Hobby plan blocks SMTP.
+
+Variables: `RESEND_API_KEY` and `DIGEST_TO` (comma-separated) are required. Optional:
+`DIGEST_FROM`, `DIGEST_HOUR` (0-23), `DIGEST_TZ`, `DIGEST_DAYS` (`weekdays` or `daily`), `APP_URL`.
+Until you verify a domain in Resend, the default sender can only email your own Resend account
+address. The Overview page shows status and has Preview and Send test buttons.
+
 ## Backups
 Click the download icon at the bottom of the sidebar (or open `/api/backup` while signed in)
 to download every table as one JSON file. Do this before any change to the Railway service.

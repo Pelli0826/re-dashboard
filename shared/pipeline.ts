@@ -131,3 +131,63 @@ export const STAGE_DEADLINES: Record<string, string[]> = {
   closed: [],
   dead: [],
 };
+
+// ── Deadlines and "needs attention" rules ────────────────────────────────
+// Shared by the Pipeline page and the morning email so they always agree.
+type DealLike = {
+  id: number; name: string; stage: string;
+  loiExpiration?: string | null; ddEndDate?: string | null; closingDate?: string | null;
+  stageChangedAt: string; lastActivityAt: string;
+};
+
+export interface Deadline { key: string; label: string; date: string; days: number }
+
+export function nextDeadline(d: DealLike, now = new Date()): Deadline | null {
+  const keys = STAGE_DEADLINES[d.stage] ?? [];
+  const list: Deadline[] = [];
+  for (const f of DEADLINE_FIELDS) {
+    if (!keys.includes(f.key)) continue;
+    const date = (d as any)[f.key] as string | null | undefined;
+    const days = daysUntil(date, now);
+    if (date && days != null) list.push({ key: f.key, label: f.label, date, days });
+  }
+  return list.sort((a, b) => a.days - b.days)[0] ?? null;
+}
+
+export type AlertKind = "deadline" | "stale" | "stuck" | "missing-date";
+export interface DealAlert<T extends DealLike = DealLike> {
+  deal: T; kind: AlertKind; severity: "high" | "medium"; text: string; deadline?: Deadline;
+}
+
+function fmtShortDate(ymd: string): string {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+export const STALE_DAYS_EARLY = 30;  // lead, screening
+export const STALE_DAYS_ACTIVE = 14; // loi, due diligence, closing
+export const DEADLINE_WINDOW_DAYS = 7;
+
+export function dealAlerts<T extends DealLike>(deals: T[], now = new Date()): DealAlert<T>[] {
+  const out: DealAlert<T>[] = [];
+  for (const d of deals) {
+    if (!ACTIVE_STAGES.includes(d.stage as Stage)) continue;
+    const dl = nextDeadline(d, now);
+    if (dl && dl.days < 0) {
+      out.push({ deal: d, kind: "deadline", severity: "high", deadline: dl, text: `${dl.label} ${fmtShortDate(dl.date)}, ${-dl.days} day${dl.days === -1 ? "" : "s"} overdue` });
+    } else if (dl && dl.days <= DEADLINE_WINDOW_DAYS) {
+      const when = dl.days === 0 ? "today" : dl.days === 1 ? "tomorrow" : `in ${dl.days} days`;
+      out.push({ deal: d, kind: "deadline", severity: dl.days <= 3 ? "high" : "medium", deadline: dl, text: `${dl.label} ${when} (${fmtShortDate(dl.date)})` });
+    }
+    const quiet = daysSince(d.lastActivityAt, now) ?? 0;
+    const early = d.stage === "lead" || d.stage === "screening";
+    if (quiet >= (early ? STALE_DAYS_EARLY : STALE_DAYS_ACTIVE)) {
+      out.push({ deal: d, kind: "stale", severity: "medium", text: `No activity logged in ${quiet} days` });
+    }
+    const inStage = daysSince(d.stageChangedAt, now) ?? 0;
+    if (d.stage === "screening" && inStage > 30) out.push({ deal: d, kind: "stuck", severity: "medium", text: `In screening ${inStage} days: move to LOI or mark dead` });
+    if (d.stage === "loi" && !d.loiExpiration) out.push({ deal: d, kind: "missing-date", severity: "medium", text: "In LOI with no expiration date set" });
+    if (d.stage === "due-diligence" && !d.ddEndDate) out.push({ deal: d, kind: "missing-date", severity: "high", text: "In due diligence with no DD end date set" });
+  }
+  return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "high" ? -1 : 1));
+}

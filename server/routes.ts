@@ -4,6 +4,7 @@ import multer from "multer";
 import crypto from "crypto";
 import { z } from "zod";
 import { extractFromPdf, type DocType } from "./extract";
+import { buildDigest, sendDigest, digestStatus } from "./digest";
 import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES } from "./claude";
 import { storage, DB_IS_PERSISTENT } from "./storage";
 import {
@@ -447,6 +448,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (err: any) {
       res.status(502).json({ message: err.message ?? "Could not read this OM." });
+    }
+  });
+
+  // ── Morning email ──────────────────────────────────────────────────
+  app.get("/api/digest/status", (_req, res) => res.json(digestStatus()));
+  app.get("/api/digest/preview", (_req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(buildDigest().html);
+  });
+  app.post("/api/digest/test", async (_req, res) => {
+    try {
+      const r = await sendDigest({ test: true });
+      res.json({ ok: true, to: r.to });
+    } catch (err: any) {
+      res.status(400).json({ message: err.message });
     }
   });
 

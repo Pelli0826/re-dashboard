@@ -6,6 +6,7 @@ import path from "path";
 import crypto from "crypto";
 import { registerRoutes } from "./routes";
 import { DATA_DIR } from "./storage";
+import { startDigestScheduler } from "./digest";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 
@@ -101,6 +102,7 @@ app.use((req, res, next) => {
 
 (async () => {
   await registerRoutes(httpServer, app);
+  startDigestScheduler();
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

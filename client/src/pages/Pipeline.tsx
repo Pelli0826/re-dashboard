@@ -8,8 +8,8 @@ import {
   STAGES, ACTIVE_STAGES, STAGE_LABELS, DEAL_TYPES, DEAL_TYPE_LABELS, SOURCES, SOURCE_LABELS,
   TEMPERATURES, COMPETITION_LEVELS, MOTIVATION_LEVELS, DEAD_REASONS, ACTIVITY_KINDS, ACTIVITY_LABELS,
   DEADLINE_FIELDS, STAGE_DEADLINES, STAGE_PROBABILITY,
-  effectiveProbability, daysSince, daysUntil, parseScenarios,
-  type Stage, type DevelopmentScenario,
+  effectiveProbability, daysSince, parseScenarios, nextDeadline, dealAlerts,
+  type Stage, type DevelopmentScenario, type Deadline,
 } from "@shared/pipeline";
 import {
   Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator,
@@ -55,18 +55,6 @@ function dealValue(d: PipelineDeal): number {
   return d.projectedValue ?? d.offerPrice ?? d.askingPrice ?? 0;
 }
 const today = () => new Date().toISOString().slice(0, 10);
-
-interface Deadline { key: string; label: string; date: string; days: number }
-function nextDeadline(d: PipelineDeal): Deadline | null {
-  const keys = STAGE_DEADLINES[d.stage] ?? [];
-  const list = DEADLINE_FIELDS
-    .filter(f => keys.includes(f.key))
-    .map(f => ({ key: f.key as string, label: f.label as string, date: ((d as any)[f.key] as string | null) ?? "" }))
-    .filter(f => f.date !== "" && daysUntil(f.date) != null)
-    .map(f => ({ ...f, days: daysUntil(f.date)! }))
-    .sort((a, b) => a.days - b.days);
-  return list[0] ?? null;
-}
 
 const stageAccent: Record<string, string> = {
   lead: "border-t-gray-400",
@@ -116,29 +104,6 @@ function DeadlineChip({ dl }: { dl: Deadline }) {
     : "text-muted-foreground bg-muted";
   const when = dl.days < 0 ? `${-dl.days}d overdue` : dl.days === 0 ? "today" : `in ${dl.days}d`;
   return <span className={`inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded whitespace-nowrap ${tone}`}><CalendarClock size={11} />{dl.label} {when}</span>;
-}
-
-// ── Alerts: what needs attention now ───────────────────────────────────────
-interface Alert { deal: PipelineDeal; severity: "high" | "medium"; text: string }
-function buildAlerts(deals: PipelineDeal[]): Alert[] {
-  const out: Alert[] = [];
-  for (const d of deals) {
-    if (!ACTIVE_STAGES.includes(d.stage as Stage)) continue;
-    const dl = nextDeadline(d);
-    if (dl && dl.days < 0) out.push({ deal: d, severity: "high", text: `${dl.label} ${fmtDate(dl.date)}, ${-dl.days} days overdue` });
-    else if (dl && dl.days <= 7) out.push({ deal: d, severity: dl.days <= 3 ? "high" : "medium", text: `${dl.label} ${dl.days === 0 ? "today" : `in ${dl.days} day${dl.days === 1 ? "" : "s"}`} (${fmtDate(dl.date)})` });
-
-    const quiet = daysSince(d.lastActivityAt) ?? 0;
-    const early = d.stage === "lead" || d.stage === "screening";
-    const staleAfter = early ? 30 : 14;
-    if (quiet >= staleAfter) out.push({ deal: d, severity: "medium", text: `No activity logged in ${quiet} days` });
-
-    const inStage = daysSince(d.stageChangedAt) ?? 0;
-    if (d.stage === "screening" && inStage > 30) out.push({ deal: d, severity: "medium", text: `In screening ${inStage} days: move to LOI or mark dead` });
-    if (d.stage === "loi" && !d.loiExpiration) out.push({ deal: d, severity: "medium", text: "In LOI with no expiration date set" });
-    if (d.stage === "due-diligence" && !d.ddEndDate) out.push({ deal: d, severity: "high", text: "In due diligence with no DD end date set" });
-  }
-  return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "high" ? -1 : 1));
 }
 
 // ── Page ────────────────────────────────────────────────────────────────────
@@ -244,7 +209,7 @@ export default function Pipeline() {
 
   const active = filtered.filter(d => ACTIVE_STAGES.includes(d.stage as Stage));
   const inactive = filtered.filter(d => !ACTIVE_STAGES.includes(d.stage as Stage));
-  const alerts = useMemo(() => buildAlerts(deals), [deals]);
+  const alerts = useMemo(() => dealAlerts(deals), [deals]);
 
   const allActive = deals.filter(d => ACTIVE_STAGES.includes(d.stage as Stage));
   const askingTotal = allActive.reduce((s, d) => s + (d.askingPrice ?? 0), 0);

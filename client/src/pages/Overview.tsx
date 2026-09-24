@@ -1,8 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
 import type { Project, PipelineDeal, ArmLoan } from "@shared/schema";
 import { STAGE_LABELS, ACTIVE_STAGES, effectiveProbability, type Stage } from "@shared/pipeline";
-import { Building2, TrendingUp, DollarSign, AlertTriangle, CheckCircle2, Clock, Loader2 } from "lucide-react";
+import { Building2, TrendingUp, DollarSign, AlertTriangle, CheckCircle2, Clock, Loader2, Mail } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +39,52 @@ const pipelineStageColor: Record<string, string> = {
   closed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   dead: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
 };
+
+interface DigestStatus {
+  configured: boolean; hasKey: boolean; to: string[]; from: string;
+  hour: number; tz: string; days: string; lastSent: string | null; lastError: string | null;
+}
+
+function MorningEmailCard() {
+  const { toast } = useToast();
+  const { data: st, refetch } = useQuery<DigestStatus>({ queryKey: ["/api/digest/status"] });
+  const test = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/digest/test")).json(),
+    onSuccess: (r: { to: string[] }) => { toast({ title: "Test email sent", description: `To ${r.to.join(", ")}` }); refetch(); },
+    onError: (e: Error) => toast({ title: "Could not send", description: e.message.replace(/^\d+:\s*/, "").replace(/^\{"message":"|"\}$/g, ""), variant: "destructive" }),
+  });
+  if (!st) return null;
+  const time = new Date(2000, 0, 1, st.hour).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const tzShort = st.tz === "America/New_York" ? "Eastern" : st.tz;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold text-foreground flex items-center gap-2"><Mail size={14} /> Morning email</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {st.configured ? (
+          <p className="text-muted-foreground">
+            Sends {st.days === "daily" ? "every day" : "weekdays"} at {time} {tzShort} to <span className="text-foreground">{st.to.join(", ")}</span>.
+            {st.lastSent ? ` Last sent ${st.lastSent}.` : " Not sent yet."}
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            Not set up. In Railway, add {st.hasKey ? "" : <><code className="text-foreground">RESEND_API_KEY</code> and </>}
+            <code className="text-foreground">DIGEST_TO</code> (your email and your partner's, separated by a comma).
+          </p>
+        )}
+        {st.lastError && <p role="alert" className="text-red-700 dark:text-red-300">Last attempt failed: {st.lastError}</p>}
+        <div className="flex gap-2">
+          <a href="/api/digest/preview" target="_blank" rel="noopener"><Button size="sm" variant="outline">Preview today's email</Button></a>
+          <Button size="sm" variant="outline" disabled={!st.configured || test.isPending} onClick={() => test.mutate()}>
+            {test.isPending && <Loader2 size={13} className="animate-spin mr-1" />} Send test now
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function Overview() {
   const { data: projects = [], isLoading: pLoading } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
@@ -77,6 +125,7 @@ export default function Overview() {
         <Link href="/pipeline"><Button data-testid="button-go-pipeline">Add a deal</Button></Link>
         <Link href="/projects"><Button variant="outline">Add a project</Button></Link>
       </div>
+      <div className="w-full max-w-md text-left mt-6"><MorningEmailCard /></div>
     </div>
   );
 
@@ -237,6 +286,8 @@ export default function Overview() {
           </div>
         </CardContent>
       </Card>
+
+      <MorningEmailCard />
     </div>
   );
 }
