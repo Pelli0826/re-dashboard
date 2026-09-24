@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { PipelineDeal, Contact, DealActivity, Task } from "@shared/schema";
@@ -10,7 +10,7 @@ import {
   type Stage, type DevelopmentScenario,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, Clock, CalendarClock, X, Phone, Mail, CheckCircle2, Circle,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
@@ -84,6 +85,21 @@ const stagePill: Record<string, string> = {
 };
 const tempDot: Record<string, string> = { hot: "bg-red-500", warm: "bg-amber-500", cold: "bg-sky-500" };
 
+// What the server returns from /api/intake/om
+interface OmAnalysis {
+  dealName: string; address?: string | null; municipality?: string | null; county?: string | null; state?: string | null;
+  propertyType: string; askingPrice?: number | null; priceNotes?: string | null;
+  units?: number | null; buildingSf?: number | null; acres?: number | null; yearBuilt?: number | null; occupancyPct?: number | null;
+  noi?: number | null; capRatePct?: number | null; grossPotentialRent?: number | null; vacancyPct?: number | null;
+  otherIncome?: number | null; operatingExpenses?: number | null;
+  zoning?: string | null; floodZone?: string | null; utilities?: string | null; groundLease?: boolean;
+  sellerName?: string | null; reasonForSale?: string | null; offersDue?: string | null;
+  broker?: { name?: string | null; company?: string | null; phone?: string | null; email?: string | null };
+  scenarios?: DevelopmentScenario[];
+  summary: string; keyRisks: string[]; missingInfo: string[]; brokerQuestions: string[];
+}
+interface Intake { analysis: OmAnalysis; mathCheck: string[]; memo: string; brokerContactId: number | null; fileName: string }
+
 function TempBadge({ t }: { t: string }) {
   return (
     <span className="inline-flex items-center gap-1 text-xs text-muted-foreground capitalize">
@@ -133,6 +149,28 @@ export default function Pipeline() {
   const [formDeal, setFormDeal] = useState<PipelineDeal | "new" | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [deadTarget, setDeadTarget] = useState<PipelineDeal | null>(null);
+  const [intake, setIntake] = useState<Intake | null>(null);
+  const [reading, setReading] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const { data: system } = useQuery<{ omIntake?: boolean }>({ queryKey: ["/api/system"] });
+
+  async function uploadOm(file: File) {
+    setReading(file.name);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch("/api/intake/om", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message ?? `Upload failed (${res.status})`);
+      setIntake({ ...data, fileName: file.name });
+      setFormDeal("new");
+    } catch (e: any) {
+      toast({ title: "Could not read the OM", description: e.message, variant: "destructive" });
+    } finally {
+      setReading(null);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  }
 
   const { data: deals = [], isLoading } = useQuery<PipelineDeal[]>({ queryKey: ["/api/pipeline"] });
   const { data: contacts = [] } = useQuery<Contact[]>({ queryKey: ["/api/contacts"] });
@@ -206,10 +244,30 @@ export default function Pipeline() {
             {unpriced > 0 && <> ({unpriced} not yet priced)</>}
           </p>
         </div>
-        <Button data-testid="button-add-deal" onClick={() => setFormDeal("new")} size="sm" className="gap-1.5">
-          <Plus size={14} /> Add deal
-        </Button>
+        <div className="flex gap-2">
+          <input ref={fileInput} type="file" accept="application/pdf,.pdf" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadOm(f); }} />
+          <Button
+            size="sm" variant="outline" className="gap-1.5" data-testid="button-upload-om"
+            onClick={() => system?.omIntake
+              ? fileInput.current?.click()
+              : toast({ title: "OM upload is not turned on", description: "Add an ANTHROPIC_API_KEY variable to the service in Railway." })}
+          >
+            <FileUp size={14} /> Upload OM
+          </Button>
+          <Button data-testid="button-add-deal" onClick={() => { setIntake(null); setFormDeal("new"); }} size="sm" className="gap-1.5">
+            <Plus size={14} /> Add deal
+          </Button>
+        </div>
       </div>
+
+      <Dialog open={!!reading}>
+        <DialogContent className="max-w-sm [&>button]:hidden" onInteractOutside={e => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Reading the OM</DialogTitle>
+            <DialogDescription>Claude is reading {reading}, including tables and site plans. This usually takes 30 to 90 seconds.</DialogDescription>
+          </DialogHeader>
+        </DialogContent>
+      </Dialog>
 
       {/* Needs attention */}
       {alerts.length > 0 && (
@@ -372,12 +430,15 @@ export default function Pipeline() {
       {formDeal && (
         <DealFormDialog
           deal={formDeal === "new" ? null : formDeal}
+          intake={formDeal === "new" ? intake : null}
           contacts={contacts}
-          onClose={() => setFormDeal(null)}
+          onClose={() => { setFormDeal(null); setIntake(null); }}
           onSaved={(saved, isNew) => {
             refresh(saved.id);
             qc.invalidateQueries({ queryKey: ["/api/contacts"] });
+            qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
             setFormDeal(null);
+            setIntake(null);
             if (isNew) setDetailId(saved.id);
           }}
         />
@@ -667,6 +728,26 @@ const MONEY_FIELDS = ["askingPrice", "offerPrice", "noi", "projectedValue"] as c
 const DECIMAL_FIELDS = ["capRate", "acres", "occupancy"] as const;
 const INT_FIELDS = ["units", "sqft", "yearBuilt", "probabilityOverride"] as const;
 
+function fromIntake(a: OmAnalysis, brokerContactId: number | null): FormState {
+  const f = toForm(null);
+  const put = (k: string, v: unknown) => { if (v != null && v !== "") f[k] = String(v); };
+  put("name", a.dealName); put("address", a.address); put("municipality", a.municipality); put("county", a.county);
+  put("state", a.state); put("type", a.propertyType); put("askingPrice", a.askingPrice); put("priceNotes", a.priceNotes);
+  put("units", a.units); put("sqft", a.buildingSf); put("acres", a.acres); put("yearBuilt", a.yearBuilt);
+  put("occupancy", a.occupancyPct); put("noi", a.noi); put("capRate", a.capRatePct);
+  put("zoning", a.zoning); put("floodZone", a.floodZone); put("utilities", a.utilities);
+  put("sellerName", a.sellerName); put("reasonForSale", a.reasonForSale);
+  f.keyRisks = a.keyRisks.join("\n");
+  if (a.offersDue) f.notes = `Offers due ${a.offersDue}.`;
+  f.groundLease = a.groundLease ? "1" : "0";
+  f.stage = "screening";
+  if (a.broker?.name || brokerContactId) f.source = "broker";
+  f.brokerContactId = brokerContactId ? String(brokerContactId) : a.broker?.name ? "new" : "none";
+  return f;
+}
+
+const UW_TYPE: Record<string, string> = { multifamily: "multifamily", land: "development" };
+
 function toForm(d: PipelineDeal | null): FormState {
   const f: FormState = {};
   for (const k of [...TEXT_FIELDS, ...MONEY_FIELDS, ...DECIMAL_FIELDS, ...INT_FIELDS]) {
@@ -694,13 +775,18 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function DealFormDialog({ deal, contacts, onClose, onSaved }: {
-  deal: PipelineDeal | null; contacts: Contact[]; onClose: () => void; onSaved: (d: PipelineDeal, isNew: boolean) => void;
+function DealFormDialog({ deal, intake, contacts, onClose, onSaved }: {
+  deal: PipelineDeal | null; intake: Intake | null; contacts: Contact[]; onClose: () => void; onSaved: (d: PipelineDeal, isNew: boolean) => void;
 }) {
   const { toast } = useToast();
-  const [f, setF] = useState<FormState>(() => toForm(deal));
-  const [scenarios, setScenarios] = useState<DevelopmentScenario[]>(() => parseScenarios(deal?.scenarios));
-  const [newBroker, setNewBroker] = useState({ name: "", company: "", phone: "", email: "" });
+  const a = intake?.analysis;
+  const [f, setF] = useState<FormState>(() => a ? fromIntake(a, intake!.brokerContactId) : toForm(deal));
+  const [scenarios, setScenarios] = useState<DevelopmentScenario[]>(() => a?.scenarios?.length ? a.scenarios : parseScenarios(deal?.scenarios));
+  const [newBroker, setNewBroker] = useState({
+    name: a?.broker?.name ?? "", company: a?.broker?.company ?? "", phone: a?.broker?.phone ?? "", email: a?.broker?.email ?? "",
+  });
+  const hasIncome = !!(a && (a.grossPotentialRent || a.noi));
+  const [createUw, setCreateUw] = useState(hasIncome);
   const [deadReason, setDeadReason] = useState(deal?.deadReason ?? "");
   const set = (k: string) => (v: string) => setF(prev => ({ ...prev, [k]: v }));
   const brokers = contacts.filter(c => c.role === "broker");
@@ -730,10 +816,33 @@ function DealFormDialog({ deal, contacts, onClose, onSaved }: {
       const res = deal
         ? await apiRequest("PATCH", `/api/pipeline/${deal.id}`, payload)
         : await apiRequest("POST", "/api/pipeline", payload);
-      return (await res.json()) as PipelineDeal;
+      const saved = (await res.json()) as PipelineDeal;
+
+      if (!deal && intake && a) {
+        // Keep Claude's screening with the deal, then optionally start an underwriting model.
+        await apiRequest("POST", `/api/pipeline/${saved.id}/activity`, { kind: "note", date: today(), summary: intake.memo });
+        if (createUw) {
+          await apiRequest("POST", "/api/underwriting", {
+            name: `${saved.dealCode} ${saved.name}`,
+            dealType: UW_TYPE[saved.type] ?? "commercial",
+            address: [saved.address, saved.municipality].filter(Boolean).join(", "),
+            createdAt: new Date().toISOString(),
+            purchasePrice: saved.askingPrice ?? 0,
+            grossPotentialRent: a.grossPotentialRent ?? 0,
+            vacancyRate: a.vacancyPct ?? 5,
+            otherIncome: a.otherIncome ?? 0,
+            operatingExpenses: a.operatingExpenses ?? 0,
+            notes: `Created from ${intake.fileName}. Check all figures against the OM.`,
+          });
+        }
+      }
+      return saved;
     },
     onSuccess: saved => {
-      toast({ title: deal ? "Deal saved" : `Deal added as ${saved.dealCode}` });
+      toast({
+        title: deal ? "Deal saved" : `Deal added as ${saved.dealCode}`,
+        description: intake ? `Screening notes saved to the activity log${createUw ? "; underwriting model created" : ""}.` : undefined,
+      });
       onSaved(saved, !deal);
     },
     onError: (e: Error) => toast({ title: "Could not save deal", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
@@ -770,9 +879,29 @@ function DealFormDialog({ deal, contacts, onClose, onSaved }: {
     <Dialog open onOpenChange={o => { if (!o) onClose(); }}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{deal ? `Edit ${deal.name}` : "Add deal"}</DialogTitle>
+          <DialogTitle>{deal ? `Edit ${deal.name}` : intake ? "Review deal from OM" : "Add deal"}</DialogTitle>
           {deal && <DialogDescription>{deal.dealCode}</DialogDescription>}
+          {intake && <DialogDescription>Claude filled this in from {intake.fileName}. Check the figures against the OM before saving.</DialogDescription>}
         </DialogHeader>
+        {intake && a && (
+          <section className="rounded-md border border-border bg-muted/40 p-4 space-y-3 text-sm" aria-label="Screening">
+            <h3 className="font-semibold text-foreground flex items-center gap-1.5"><Sparkles size={14} className="text-primary" /> Screening</h3>
+            <p className="text-foreground">{a.summary}</p>
+            {[["Key risks", a.keyRisks], ["Math check", intake.mathCheck], ["Missing from the package", a.missingInfo], ["Questions for the broker", a.brokerQuestions]]
+              .filter(([, items]) => (items as string[]).length > 0)
+              .map(([title, items]) => (
+                <div key={title as string}>
+                  <h4 className="font-medium text-foreground">{title as string}</h4>
+                  <ul className="list-disc pl-5 text-muted-foreground space-y-0.5">{(items as string[]).map((t, i) => <li key={i}>{t}</li>)}</ul>
+                </div>
+              ))}
+            <p className="text-xs text-muted-foreground">These notes are saved to the deal's activity log.</p>
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <Checkbox checked={createUw} onCheckedChange={c => setCreateUw(c === true)} />
+              Also create an underwriting model from the OM's numbers
+            </label>
+          </section>
+        )}
         <form className="space-y-6" onSubmit={e => { e.preventDefault(); if (canSave) save.mutate(); }}>
           {/* Field helpers are called as functions (not <T />) so inputs keep focus while typing */}
           <Group title="Property">
@@ -881,7 +1010,7 @@ function DealFormDialog({ deal, contacts, onClose, onSaved }: {
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" disabled={!canSave || save.isPending} data-testid="button-save-deal">
               {save.isPending && <Loader2 className="animate-spin mr-1" size={14} />}
-              {deal ? "Save deal" : "Add deal"}
+              {deal ? "Save deal" : intake ? "Save deal and notes" : "Add deal"}
             </Button>
           </div>
         </form>

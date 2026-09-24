@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { PDFParse } from "pdf-parse";
 import { fromBuffer } from "pdf2pic";
+import { claudeConfigured, claudeJsonFromPdf } from "./claude";
 
 // Lazy init — only create client when a request actually comes in
 function getOpenAI() {
@@ -64,7 +65,7 @@ export type DocType = "om" | "rentroll" | "pl";
 export interface ExtractedData {
   docType: DocType;
   raw: Record<string, any>;
-  method: "vision" | "text";
+  method: "claude" | "vision" | "text";
   dealName?: string | null;
   address?: string | null;
   dealType?: string | null;
@@ -108,8 +109,13 @@ export async function extractFromPdf(buffer: Buffer, docType: DocType): Promise<
   if (!prompt) throw new Error("Unknown document type");
 
   let raw: Record<string, any> = {};
-  let method: "vision" | "text" = "vision";
+  let method: "claude" | "vision" | "text" = "vision";
 
+  if (claudeConfigured()) {
+    // Claude reads the whole PDF (text + page images) in one request.
+    raw = await claudeJsonFromPdf(buffer, prompt);
+    method = "claude";
+  } else {
   // Strategy 1: Try vision-based extraction (works on scanned PDFs)
   try {
     const images = await pdfToImages(buffer, 10);
@@ -174,6 +180,8 @@ export async function extractFromPdf(buffer: Buffer, docType: DocType): Promise<
         (textErr.message ?? "")
       );
     }
+  }
+
   }
 
   // ── Normalize into underwriting fields ──────────────────────────────────

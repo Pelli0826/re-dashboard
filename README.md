@@ -17,7 +17,10 @@ Overview, Projects, Pipeline (deal flow CRM), ARM Loans, Cash Flow, Investors, C
 2. **Set variables** (service → Variables):
    - `DASHBOARD_PASSWORD`: required. Without it the dashboard stays locked.
    - `SESSION_SECRET`: a long random string. Keeps people signed in across restarts.
-   - `OPENAI_API_KEY`: optional, only for PDF auto-fill in Underwriting.
+   - `ANTHROPIC_API_KEY`: turns on **Upload OM** (Pipeline) and PDF auto-fill (Underwriting).
+     Create one at console.anthropic.com. Usage is billed per request by Anthropic.
+   - `ANTHROPIC_MODEL`: optional, defaults to `claude-sonnet-5`.
+   - `OPENAI_API_KEY`: optional legacy fallback for Underwriting auto-fill if no Anthropic key is set.
    - `DB_PATH`: optional, overrides the database location (e.g. `/data/data.db`).
 3. Deploys run automatically when you push to GitHub. Health check: `/api/health`.
 
@@ -33,6 +36,10 @@ to download every table as one JSON file. Do this before any change to the Railw
   and deals stuck in screening.
 - Land and redevelopment deals can hold acreage, zoning, floodplain, utilities and
   multiple development scenarios for sites priced by use.
+- **Upload OM**: Claude reads the whole PDF (up to 24 MB), pre-fills a new deal for review,
+  matches or adds the listing broker, runs NOI and cap-rate math checks in code, and saves a
+  screening memo (risks, missing info, broker questions) to the deal's activity log. For income
+  properties it can also start an Underwriting model.
 - Vocabulary (stages, types, sources, default probabilities) lives in `shared/pipeline.ts`.
 
 ## Local development

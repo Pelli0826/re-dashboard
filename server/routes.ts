@@ -4,6 +4,7 @@ import multer from "multer";
 import crypto from "crypto";
 import { z } from "zod";
 import { extractFromPdf, type DocType } from "./extract";
+import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES } from "./claude";
 import { storage, DB_IS_PERSISTENT } from "./storage";
 import {
   STAGES, DEAL_TYPES, ACTIVITY_KINDS, STAGE_LABELS, daysSince, type Stage,
@@ -130,7 +131,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.delete("/api/projects/:id", (req, res) => { storage.deleteProject(Number(req.params.id)); res.status(204).send(); });
 
   // ── System status & backup ─────────────────────────────────────────
-  app.get("/api/system", (_req, res) => res.json({ persistentStorage: DB_IS_PERSISTENT }));
+  app.get("/api/system", (_req, res) => res.json({ persistentStorage: DB_IS_PERSISTENT, omIntake: claudeConfigured() }));
   app.get("/api/backup", (_req, res) => {
     const stamp = new Date().toISOString().slice(0, 10);
     res.setHeader("Content-Disposition", `attachment; filename="re-dashboard-backup-${stamp}.json"`);
@@ -385,8 +386,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
   app.post("/api/underwriting/extract", upload.single("file"), async (req, res) => {
     try {
-      if (!process.env.OPENAI_API_KEY) {
-        return res.status(400).json({ message: "OPENAI_API_KEY not configured on server." });
+      if (!claudeConfigured() && !process.env.OPENAI_API_KEY) {
+        return res.status(400).json({ message: "Set ANTHROPIC_API_KEY in Railway to enable document reading." });
       }
       if (!req.file) return res.status(400).json({ message: "No file uploaded." });
       const docType = (req.body.docType ?? "om") as DocType;
@@ -397,6 +398,40 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ message: err.message ?? "Extraction failed" });
+    }
+  });
+
+  // ── OM intake: Claude reads the package, returns a prefilled deal + screening ──
+  const omUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PDF_BYTES } });
+  app.post("/api/intake/om", (req, res, next) => {
+    omUpload.single("file")(req, res, err => {
+      if (err?.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "This PDF is over 24 MB. Compress it (Preview: File → Export → Reduce File Size) or upload the financial section only." });
+      if (err) return next(err);
+      next();
+    });
+  }, async (req, res) => {
+    if (!claudeConfigured()) return res.status(400).json({ message: "Set ANTHROPIC_API_KEY in Railway to turn on OM upload." });
+    if (!req.file) return res.status(400).json({ message: "No file uploaded." });
+    const isPdf = req.file.mimetype === "application/pdf" || req.file.buffer.subarray(0, 5).toString() === "%PDF-";
+    if (!isPdf) return res.status(400).json({ message: "Upload the OM as a PDF." });
+    try {
+      const analysis = await analyzeOm(req.file.buffer);
+      const checks = mathCheck(analysis);
+      // Match the listing broker to an existing contact by name or email.
+      const b = analysis.broker;
+      const match = b?.name || b?.email
+        ? storage.getContacts().find(c =>
+            (b.email && c.email?.toLowerCase() === b.email.toLowerCase()) ||
+            (b.name && c.name.trim().toLowerCase() === b.name.trim().toLowerCase()))
+        : undefined;
+      res.json({
+        analysis,
+        mathCheck: checks,
+        memo: screeningMemo(analysis, checks, req.file.originalname),
+        brokerContactId: match?.id ?? null,
+      });
+    } catch (err: any) {
+      res.status(502).json({ message: err.message ?? "Could not read this OM." });
     }
   });
 
