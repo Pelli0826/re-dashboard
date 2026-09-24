@@ -136,6 +136,19 @@ function addColumnIfMissing(table: string, column: string, ddl: string) {
   }
 }
 addColumnIfMissing("tasks", "deal_id", "deal_id INTEGER");
+addColumnIfMissing("underwriting", "deal_id", "deal_id INTEGER");
+
+// Link models created from an OM before linking existed (named "D-2026-001 …").
+{
+  const orphans = sqlite.prepare("SELECT id, name FROM underwriting WHERE deal_id IS NULL").all() as { id: number; name: string }[];
+  const findDeal = sqlite.prepare("SELECT id FROM deals WHERE deal_code = ?");
+  const link = sqlite.prepare("UPDATE underwriting SET deal_id = ? WHERE id = ?");
+  for (const o of orphans) {
+    const code = o.name.match(/^(D-\d{4}-\d{3})\b/)?.[1];
+    const deal = code ? findDeal.get(code) as { id: number } | undefined : undefined;
+    if (deal) { link.run(deal.id, o.id); console.log(`[db] linked underwriting ${o.id} to deal ${code}`); }
+  }
+}
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface IStorage {
@@ -220,6 +233,7 @@ export class DatabaseStorage implements IStorage {
     sqlite.transaction(() => {
       db.delete(dealActivity).where(eq(dealActivity.dealId, id)).run();
       db.update(tasks).set({ dealId: null }).where(eq(tasks.dealId, id)).run();
+      db.update(underwriting).set({ dealId: null }).where(eq(underwriting.dealId, id)).run();
       db.delete(pipeline).where(eq(pipeline.id, id)).run();
     })();
   }

@@ -225,6 +225,7 @@ export const underwriting = sqliteTable("underwriting", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),                    // deal name
   dealType: text("deal_type").notNull(),            // multifamily | commercial | development | value-add
+  dealId: integer("deal_id"),                        // linked pipeline deal; its offer sets purchasePrice
   address: text("address"),
   createdAt: text("created_at").notNull(),
 

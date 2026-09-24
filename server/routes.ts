@@ -185,6 +185,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
 
     const updated = storage.updatePipelineDeal(id, data)!;
+
+    // Keep linked underwriting models priced at our offer (or the asking price if no offer yet).
+    // Only when the price actually changed, so editing other fields never overwrites a hand-set model price.
+    const priceTouched = updated.offerPrice !== existing.offerPrice || updated.askingPrice !== existing.askingPrice;
+    const newPrice = updated.offerPrice ?? updated.askingPrice;
+    if (priceTouched && newPrice && newPrice > 0) {
+      for (const m of storage.getUnderwritingDeals().filter(u => u.dealId === id && u.purchasePrice !== newPrice)) {
+        storage.updateUnderwritingDeal(m.id, { purchasePrice: newPrice });
+        storage.addDealActivity(id, new Date().toISOString().slice(0, 10), "note",
+          `Underwriting "${m.name}" purchase price updated from $${Math.round(m.purchasePrice).toLocaleString()} to $${Math.round(newPrice).toLocaleString()} to match the ${updated.offerPrice ? "offer" : "asking price"}.`);
+      }
+    }
+
     if (stageChanged) {
       const days = daysSince(existing.stageChangedAt) ?? 0;
       let summary = `${STAGE_LABELS[existing.stage as Stage] ?? existing.stage} → ${STAGE_LABELS[newStage as Stage] ?? newStage} after ${days} day${days === 1 ? "" : "s"}`;

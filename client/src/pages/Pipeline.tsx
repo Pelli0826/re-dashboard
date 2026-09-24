@@ -1,7 +1,9 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { PipelineDeal, Contact, DealActivity, Task } from "@shared/schema";
+import type { PipelineDeal, Contact, DealActivity, Task, UnderwritingDeal } from "@shared/schema";
+import { buildProforma, calcReturns } from "@shared/underwriting";
+import { useLocation } from "wouter";
 import {
   STAGES, ACTIVE_STAGES, STAGE_LABELS, DEAL_TYPES, DEAL_TYPE_LABELS, SOURCES, SOURCE_LABELS,
   TEMPERATURES, COMPETITION_LEVELS, MOTIVATION_LEVELS, DEAD_REASONS, ACTIVITY_KINDS, ACTIVITY_LABELS,
@@ -10,7 +12,7 @@ import {
   type Stage, type DevelopmentScenario,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -496,6 +498,75 @@ function DeadReasonDialog({ deal, onClose, onConfirm }: { deal: PipelineDeal | n
   );
 }
 
+// ── Linked underwriting ─────────────────────────────────────────────────────
+export const OPEN_UW_KEY = "openUnderwritingId";
+
+function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [, navigate] = useLocation();
+  const { data: models = [] } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
+  const linked = models.filter(m => m.dealId === deal.id);
+
+  const open = (id: number) => {
+    try { sessionStorage.setItem(OPEN_UW_KEY, String(id)); } catch { /* storage unavailable */ }
+    navigate("/underwriting");
+  };
+  const create = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/underwriting", {
+        name: `${deal.dealCode} ${deal.name}`,
+        dealId: deal.id,
+        dealType: UW_TYPE[deal.type] ?? "commercial",
+        address: [deal.address, deal.municipality].filter(Boolean).join(", "),
+        createdAt: new Date().toISOString(),
+        purchasePrice: deal.offerPrice ?? deal.askingPrice ?? 0,
+        notes: `Created from pipeline deal ${deal.dealCode}.`,
+      });
+      return (await res.json()) as UnderwritingDeal;
+    },
+    onSuccess: m => { qc.invalidateQueries({ queryKey: ["/api/underwriting"] }); open(m.id); },
+    onError: (e: Error) => toast({ title: "Could not create model", description: e.message, variant: "destructive" }),
+  });
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-foreground">Underwriting</h3>
+      {linked.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border p-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm text-muted-foreground">No model yet. Its purchase price will follow this deal's offer.</p>
+          <Button size="sm" variant="outline" className="gap-1" onClick={() => create.mutate()} disabled={create.isPending}>
+            {create.isPending ? <Loader2 size={13} className="animate-spin" /> : <Calculator size={13} />} Create model
+          </Button>
+        </div>
+      ) : linked.map(m => {
+        const hasIncome = m.grossPotentialRent > 0 && m.purchasePrice > 0;
+        const r = hasIncome ? calcReturns(m, buildProforma(m)) : null;
+        return (
+          <div key={m.id} className="rounded-md border border-border p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm font-medium text-foreground">{m.name}</span>
+              <Button size="sm" variant="ghost" className="gap-1 h-7" onClick={() => open(m.id)}><Calculator size={13} /> Open</Button>
+            </div>
+            <dl className="grid grid-cols-3 gap-x-4 gap-y-2">
+              <Fact label="Purchase price" value={m.purchasePrice ? fmtMoney(m.purchasePrice) : "Not set"} />
+              {r && <>
+                <Fact label="Levered IRR" value={`${r.irr.toFixed(1)}%`} />
+                <Fact label="Equity multiple" value={`${r.equityMultiple.toFixed(2)}x`} />
+                <Fact label="Yr 1 yield on cost" value={`${r.yr1CapRate.toFixed(2)}%`} />
+                <Fact label="Yr 1 cash-on-cash" value={`${r.yr1CoC.toFixed(1)}%`} />
+                <Fact label="Yr 1 DSCR" value={m.loanAmount > 0 ? `${r.yr1Dscr.toFixed(2)}x` : "No loan"} />
+              </>}
+            </dl>
+            {!r && <p className="text-xs text-muted-foreground">Add rents, expenses and financing in the model to see returns.</p>}
+            <p className="text-xs text-muted-foreground">Purchase price updates automatically when this deal's offer changes.</p>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 // ── Detail sheet ────────────────────────────────────────────────────────────
 function Fact({ label, value }: { label: string; value: React.ReactNode }) {
   if (value == null || value === "" || value === "—") return null;
@@ -590,7 +661,7 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
               {deal.priceNotes && <p className="text-sm text-muted-foreground">{deal.priceNotes}</p>}
             </section>
 
-            <section className="space-y-2">
+            {[deal.acres, deal.sqft, deal.units, deal.yearBuilt, deal.occupancy, deal.county, deal.zoning, deal.floodZone, deal.groundLease || null, deal.utilities].some(v => v != null && v !== "") && <section className="space-y-2">
               <h3 className="text-sm font-semibold text-foreground">Property</h3>
               <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
                 <Fact label="Land" value={deal.acres ? `${deal.acres} acres` : null} />
@@ -604,7 +675,7 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
                 <Fact label="Ground lease" value={deal.groundLease ? "Yes" : null} />
               </dl>
               {deal.utilities && <p className="text-sm text-muted-foreground">Utilities: {deal.utilities}</p>}
-            </section>
+            </section>}
 
             {scenarios.length > 0 && (
               <section className="space-y-2">
@@ -644,7 +715,7 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
               {deal.reasonForSale && <p className="text-sm text-muted-foreground">Reason for sale: {deal.reasonForSale}</p>}
             </section>
 
-            <section className="space-y-2">
+            {[deal.firstContactDate, deal.loiDate, deal.loiExpiration, deal.contractDate, deal.ddEndDate, deal.closingDate].some(Boolean) && <section className="space-y-2">
               <h3 className="text-sm font-semibold text-foreground">Key dates</h3>
               <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
                 <Fact label="First contact" value={deal.firstContactDate ? fmtDate(deal.firstContactDate) : null} />
@@ -654,7 +725,9 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
                 <Fact label="DD ends" value={deal.ddEndDate ? fmtDate(deal.ddEndDate) : null} />
                 <Fact label="Closing" value={deal.closingDate ? fmtDate(deal.closingDate) : null} />
               </dl>
-            </section>
+            </section>}
+
+            <UnderwritingSummary deal={deal} />
 
             {(deal.keyRisks || deal.notes) && (
               <section className="space-y-2">
@@ -824,6 +897,7 @@ function DealFormDialog({ deal, intake, contacts, onClose, onSaved }: {
         if (createUw) {
           await apiRequest("POST", "/api/underwriting", {
             name: `${saved.dealCode} ${saved.name}`,
+            dealId: saved.id,
             dealType: UW_TYPE[saved.type] ?? "commercial",
             address: [saved.address, saved.municipality].filter(Boolean).join(", "),
             createdAt: new Date().toISOString(),

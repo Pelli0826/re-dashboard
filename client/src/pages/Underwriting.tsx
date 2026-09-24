@@ -1,7 +1,8 @@
-import { useState, useMemo, useCallback, useRef } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { UnderwritingDeal, InsertUnderwriting } from "@shared/schema";
+import { buildProforma, calcReturns } from "@shared/underwriting";
 import { insertUnderwritingSchema } from "@shared/schema";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -20,116 +21,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-
-// ─── Financial math helpers ────────────────────────────────────────────────
-
-function calcAnnualDebtService(loan: number, rate: number, amortYears: number, ioYears: number, year: number): number {
-  if (loan <= 0 || rate <= 0) return 0;
-  const r = rate / 100 / 12;
-  // During I/O period
-  if (ioYears > 0 && year <= ioYears) return loan * (rate / 100);
-  // Amortizing — recalc balance after I/O years
-  let balance = loan;
-  if (ioYears > 0) {
-    // balance doesn't change during I/O
-    balance = loan;
-  }
-  const n = amortYears * 12;
-  if (r === 0) return balance / amortYears;
-  const monthly = balance * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
-  return monthly * 12;
-}
-
-function calcNPV(rate: number, cashFlows: number[]): number {
-  return cashFlows.reduce((acc, cf, i) => acc + cf / Math.pow(1 + rate, i + 1), 0);
-}
-
-function calcIRR(cashFlows: number[], guess = 0.1): number {
-  // Newton-Raphson with initial equity outflow at t=0
-  let r = guess;
-  for (let i = 0; i < 100; i++) {
-    const npv = cashFlows.reduce((acc, cf, t) => acc + cf / Math.pow(1 + r, t), 0);
-    const dnpv = cashFlows.reduce((acc, cf, t) => acc - t * cf / Math.pow(1 + r, t + 1), 0);
-    if (Math.abs(dnpv) < 1e-10) break;
-    const rNew = r - npv / dnpv;
-    if (Math.abs(rNew - r) < 1e-8) { r = rNew; break; }
-    r = rNew;
-  }
-  return isFinite(r) ? r : 0;
-}
-
-interface ProformaYear {
-  year: number;
-  gpr: number;
-  vacancy: number;
-  egi: number;
-  otherIncome: number;
-  opex: number;
-  mgmtFee: number;
-  capex: number;
-  totalExpenses: number;
-  noi: number;
-  debtService: number;
-  cashFlow: number;
-  capRate: number;
-  dscr: number;
-}
-
-function buildProforma(d: UnderwritingDeal): ProformaYear[] {
-  const rows: ProformaYear[] = [];
-  const totalCost = d.purchasePrice * (1 + d.closingCosts / 100) + d.renovationBudget;
-
-  for (let yr = 1; yr <= d.holdYears; yr++) {
-    const g = Math.pow(1 + d.rentGrowthRate / 100, yr - 1);
-    const eg = Math.pow(1 + d.expenseGrowthRate / 100, yr - 1);
-
-    const gpr = d.grossPotentialRent * g;
-    const vacancy = gpr * (d.vacancyRate / 100);
-    const egi = gpr - vacancy;
-    const otherIncome = d.otherIncome * g;
-    const opex = d.operatingExpenses * eg;
-    const mgmtFee = (egi + otherIncome) * (d.managementFeeRate / 100);
-    const capex = d.capexReserve * eg;
-    const totalExpenses = opex + mgmtFee + capex;
-    const noi = egi + otherIncome - totalExpenses;
-    const debtService = calcAnnualDebtService(d.loanAmount, d.interestRate, d.amortizationYears, d.ioYears, yr);
-    const cashFlow = noi - debtService;
-    const capRate = totalCost > 0 ? (noi / totalCost) * 100 : 0;
-    const dscr = debtService > 0 ? noi / debtService : 0;
-
-    rows.push({ year: yr, gpr, vacancy, egi, otherIncome, opex, mgmtFee, capex, totalExpenses, noi, debtService, cashFlow, capRate, dscr });
-  }
-  return rows;
-}
-
-function calcReturns(d: UnderwritingDeal, proforma: ProformaYear[]) {
-  const totalCost = d.purchasePrice * (1 + d.closingCosts / 100) + d.renovationBudget;
-  const equity = d.equityIn > 0 ? d.equityIn : totalCost - d.loanAmount;
-
-  // Exit value based on final year NOI / exit cap
-  const finalNoi = proforma[proforma.length - 1]?.noi ?? 0;
-  const exitValue = d.exitCapRate > 0 ? finalNoi / (d.exitCapRate / 100) : 0;
-  const netExitProceeds = exitValue * (1 - d.sellingCosts / 100) - d.loanAmount;
-
-  // Year 1 metrics
-  const yr1 = proforma[0];
-  const yr1CapRate = totalCost > 0 ? ((yr1?.noi ?? 0) / totalCost) * 100 : 0;
-  const yr1CoC = equity > 0 ? ((yr1?.cashFlow ?? 0) / equity) * 100 : 0;
-  const yr1Dscr = yr1?.dscr ?? 0;
-
-  // IRR — cash flows: [-equity, cf1, cf2, ..., cfN + exitProceeds]
-  const irr_cfs = [
-    -equity,
-    ...proforma.map((r, i) => i === proforma.length - 1 ? r.cashFlow + netExitProceeds : r.cashFlow),
-  ];
-  const irr = calcIRR(irr_cfs) * 100;
-
-  // Equity multiple
-  const totalDistributions = proforma.reduce((s, r) => s + r.cashFlow, 0) + netExitProceeds;
-  const equityMultiple = equity > 0 ? (totalDistributions + equity) / equity : 0;
-
-  return { totalCost, equity, exitValue, netExitProceeds, yr1CapRate, yr1CoC, yr1Dscr, irr, equityMultiple };
-}
 
 // ─── Formatting ────────────────────────────────────────────────────────────
 function fmt$(n: number): string {
@@ -213,6 +104,16 @@ export default function Underwriting() {
   const plRef = useRef<HTMLInputElement>(null);
 
   const { data: deals = [], isLoading } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
+
+  // Opened from a Pipeline deal: select that model once the list has loaded.
+  useEffect(() => {
+    let wanted: string | null = null;
+    try { wanted = sessionStorage.getItem("openUnderwritingId"); } catch { /* storage unavailable */ }
+    if (!wanted || deals.length === 0) return;
+    const d = deals.find(x => x.id === Number(wanted));
+    try { sessionStorage.removeItem("openUnderwritingId"); } catch { /* ignore */ }
+    if (d) selectDeal(d);
+  }, [deals]);
 
   // Live calculator state (local, mirrors selected deal + edits)
   const [calc, setCalc] = useState<FormValues>(DEFAULT_VALUES);
@@ -364,6 +265,7 @@ export default function Underwriting() {
                     <span className={`text-[11px] px-2 py-0.5 rounded font-medium capitalize ${dealTypeColor[calc.dealType] ?? ""}`}>{calc.dealType}</span>
                   </div>
                   {calc.address && <p className="text-xs text-muted-foreground">{calc.address}</p>}
+                  {selected?.dealId && <p className="text-xs text-muted-foreground">Linked to a Pipeline deal. Purchase price updates when the deal's offer changes.</p>}
                 </div>
                 <div className="flex gap-2">
                   {editMode ? (
