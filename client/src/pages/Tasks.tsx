@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Task, InsertTask, Project } from "@shared/schema";
@@ -175,6 +176,7 @@ export default function Tasks() {
     },
   });
 
+  const confirm = useConfirm();
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/tasks/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/tasks"] }); toast({ title: "Task deleted" }); },
@@ -362,7 +364,7 @@ export default function Tasks() {
                       >✎</button>
                       <button
                         data-testid={`btn-delete-task-${t.id}`}
-                        onClick={() => remove.mutate(t.id)}
+                        onClick={async () => { if (await confirm({ title: `Delete ${t.title}?` })) remove.mutate(t.id); }}
                         className="p-1.5 rounded hover:bg-destructive/10 transition-colors text-muted-foreground hover:text-destructive"
                         title="Delete"
                       ><Trash2 size={13} /></button>

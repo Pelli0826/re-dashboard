@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Document, InsertDocument, Project } from "@shared/schema";
@@ -65,6 +66,7 @@ export default function Documents() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/documents"] }); setOpen(false); toast({ title: editing ? "Document updated" : "Document added" }); },
   });
 
+  const confirm = useConfirm();
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/documents/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/documents"] }); toast({ title: "Document removed" }); },
@@ -168,7 +170,7 @@ export default function Documents() {
                       <td className="px-4 py-2.5">
                         <div className="flex gap-1 justify-end">
                           <button onClick={() => openEdit(d)} className="p-1.5 hover:bg-muted rounded text-muted-foreground hover:text-foreground transition-colors" data-testid={`button-edit-doc-${d.id}`}><Pencil size={12} /></button>
-                          <button onClick={() => remove.mutate(d.id)} className="p-1.5 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors" data-testid={`button-delete-doc-${d.id}`}><Trash2 size={12} /></button>
+                          <button onClick={async () => { if (await confirm({ title: `Delete ${d.name}?` })) remove.mutate(d.id); }} className="p-1.5 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors" data-testid={`button-delete-doc-${d.id}`}><Trash2 size={12} /></button>
                         </div>
                       </td>
                     </tr>

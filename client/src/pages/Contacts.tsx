@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Contact, InsertContact, Project } from "@shared/schema";
@@ -67,6 +68,7 @@ export default function Contacts() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/contacts"] }); setOpen(false); toast({ title: editing ? "Contact updated" : "Contact added" }); },
   });
 
+  const confirm = useConfirm();
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/contacts/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/contacts"] }); toast({ title: "Contact removed" }); },
@@ -143,7 +145,7 @@ export default function Contacts() {
                     </div>
                     <div className="flex gap-0.5 shrink-0">
                       <button onClick={() => openEdit(c)} className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground" data-testid={`button-edit-contact-${c.id}`}><Pencil size={11} /></button>
-                      <button onClick={() => remove.mutate(c.id)} className="p-1.5 hover:bg-destructive/10 rounded transition-colors text-muted-foreground hover:text-destructive" data-testid={`button-delete-contact-${c.id}`}><Trash2 size={11} /></button>
+                      <button onClick={async () => { if (await confirm({ title: `Delete ${c.name}?`, description: "Deals that list this contact as broker will show no broker." })) remove.mutate(c.id); }} className="p-1.5 hover:bg-destructive/10 rounded transition-colors text-muted-foreground hover:text-destructive" data-testid={`button-delete-contact-${c.id}`}><Trash2 size={11} /></button>
                     </div>
                   </div>
                   <div className="mt-1.5">

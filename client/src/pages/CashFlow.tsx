@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { CashFlowEntry, InsertCashFlow, Project } from "@shared/schema";
@@ -75,6 +76,7 @@ export default function CashFlow() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/cashflow"] }); setOpen(false); toast({ title: "Entry added" }); },
   });
 
+  const confirm = useConfirm();
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/cashflow/${id}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/cashflow"] }); toast({ title: "Entry removed" }); },
@@ -212,7 +214,7 @@ export default function CashFlow() {
                     </td>
                     <td className="px-4 py-2 text-xs text-muted-foreground hidden lg:table-cell">{e.notes ?? "—"}</td>
                     <td className="px-4 py-2">
-                      <button onClick={() => remove.mutate(e.id)} className="p-1.5 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors">
+                      <button onClick={async () => { if (await confirm({ title: `Delete ${`${e.subcategory} (${e.month})`}?` })) remove.mutate(e.id); }} className="p-1.5 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors">
                         <Trash2 size={12} />
                       </button>
                     </td>

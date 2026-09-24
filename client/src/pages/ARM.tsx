@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { ArmLoan, InsertArmLoan } from "@shared/schema";
@@ -93,6 +94,7 @@ export default function ARM() {
     },
   });
 
+  const confirm = useConfirm();
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/arm/${id}`),
     onSuccess: () => {
@@ -227,7 +229,7 @@ export default function ARM() {
                       <td className="px-4 py-2.5">
                         <div className="flex gap-1 justify-end">
                           <button onClick={() => openEdit(l)} className="p-1.5 hover:bg-muted rounded text-muted-foreground hover:text-foreground transition-colors" data-testid={`button-edit-loan-${l.id}`}><Pencil size={12} /></button>
-                          <button onClick={() => remove.mutate(l.id)} className="p-1.5 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors" data-testid={`button-delete-loan-${l.id}`}><Trash2 size={12} /></button>
+                          <button onClick={async () => { if (await confirm({ title: `Delete ${l.loanName}?` })) remove.mutate(l.id); }} className="p-1.5 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors" data-testid={`button-delete-loan-${l.id}`}><Trash2 size={12} /></button>
                         </div>
                       </td>
                     </tr>

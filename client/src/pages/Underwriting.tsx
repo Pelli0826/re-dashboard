@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { UnderwritingDeal, InsertUnderwriting } from "@shared/schema";
@@ -105,6 +106,11 @@ export default function Underwriting() {
 
   const { data: deals = [], isLoading } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
 
+  // If the selected model was deleted (e.g. along with its Pipeline deal), clear it.
+  useEffect(() => {
+    if (selected && !deals.some(d => d.id === selected.id)) { setSelected(null); setEditMode(false); }
+  }, [deals]);
+
   // Opened from a Pipeline deal: select that model once the list has loaded.
   useEffect(() => {
     let wanted: string | null = null;
@@ -152,6 +158,7 @@ export default function Underwriting() {
     },
   });
 
+  const confirm = useConfirm();
   const deleteDeal = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/underwriting/${id}`),
     onSuccess: () => {
@@ -278,7 +285,10 @@ export default function Underwriting() {
                   ) : (
                     <>
                       <Button size="sm" variant="outline" onClick={() => setEditMode(true)}>Edit Inputs</Button>
-                      <Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => selected && deleteDeal.mutate(selected.id)}>
+                      <Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={async () => {
+                        if (!selected) return;
+                        if (await confirm({ title: `Delete ${selected.name}?`, description: selected.dealId ? "Its Pipeline deal is kept; you can create a new model from the deal later." : undefined })) deleteDeal.mutate(selected.id);
+                      }}>
                         <Trash2 size={13} />
                       </Button>
                     </>

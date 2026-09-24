@@ -127,6 +127,11 @@ sqlite.exec(`
   );
 `);
 
+function parseIds(raw: string | null | undefined): number[] {
+  if (!raw) return [];
+  try { const v = JSON.parse(raw); return Array.isArray(v) ? v.map(Number) : []; } catch { return []; }
+}
+
 // ── Lightweight migrations for databases created by older versions ───────
 function addColumnIfMissing(table: string, column: string, ddl: string) {
   const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
@@ -158,6 +163,8 @@ export interface IStorage {
   createProject(data: InsertProject): Project;
   updateProject(id: number, data: Partial<InsertProject>): Project | undefined;
   deleteProject(id: number): void;
+  projectRelatedCounts(id: number): Record<string, number>;
+  dealRelatedCounts(id: number): Record<string, number>;
   // Pipeline
   getPipeline(): PipelineDeal[];
   getPipelineDeal(id: number): PipelineDeal | undefined;
@@ -213,7 +220,6 @@ export class DatabaseStorage implements IStorage {
   getProject(id: number) { return db.select().from(projects).where(eq(projects.id, id)).get(); }
   createProject(data: InsertProject) { return db.insert(projects).values(data).returning().get(); }
   updateProject(id: number, data: Partial<InsertProject>) { return db.update(projects).set(data).where(eq(projects.id, id)).returning().get(); }
-  deleteProject(id: number) { db.delete(projects).where(eq(projects.id, id)).run(); }
 
   // Pipeline
   getPipeline() { return db.select().from(pipeline).all(); }
@@ -229,13 +235,52 @@ export class DatabaseStorage implements IStorage {
   updatePipelineDeal(id: number, data: Partial<PipelineDeal>) {
     return db.update(pipeline).set({ ...data, updatedAt: new Date().toISOString() }).where(eq(pipeline.id, id)).returning().get();
   }
+  // Deleting a deal removes everything that belongs to it.
   deletePipelineDeal(id: number) {
     sqlite.transaction(() => {
       db.delete(dealActivity).where(eq(dealActivity.dealId, id)).run();
-      db.update(tasks).set({ dealId: null }).where(eq(tasks.dealId, id)).run();
-      db.update(underwriting).set({ dealId: null }).where(eq(underwriting.dealId, id)).run();
+      db.delete(tasks).where(eq(tasks.dealId, id)).run();
+      db.delete(underwriting).where(eq(underwriting.dealId, id)).run();
       db.delete(pipeline).where(eq(pipeline.id, id)).run();
     })();
+  }
+  dealRelatedCounts(id: number) {
+    const count = (sql: string) => (sqlite.prepare(sql).get(id) as { n: number }).n;
+    return {
+      tasks: count("SELECT COUNT(*) AS n FROM tasks WHERE deal_id = ?"),
+      underwriting: count("SELECT COUNT(*) AS n FROM underwriting WHERE deal_id = ?"),
+      activity: count("SELECT COUNT(*) AS n FROM deal_activity WHERE deal_id = ?"),
+    };
+  }
+  // Deleting a project removes its cash flow, investors, documents, tasks and loans,
+  // and takes it off any contacts (the contacts themselves are kept).
+  deleteProject(id: number) {
+    sqlite.transaction(() => {
+      db.delete(cashFlow).where(eq(cashFlow.projectId, id)).run();
+      db.delete(investors).where(eq(investors.projectId, id)).run();
+      db.delete(documents).where(eq(documents.projectId, id)).run();
+      db.delete(tasks).where(eq(tasks.projectId, id)).run();
+      db.delete(armLoans).where(eq(armLoans.projectId, id)).run();
+      for (const c of this.contactsOnProject(id)) {
+        const ids = parseIds(c.projectIds).filter(x => x !== id);
+        db.update(contacts).set({ projectIds: ids.length ? JSON.stringify(ids) : null }).where(eq(contacts.id, c.id)).run();
+      }
+      db.delete(projects).where(eq(projects.id, id)).run();
+    })();
+  }
+  contactsOnProject(id: number) {
+    return db.select().from(contacts).all().filter(c => parseIds(c.projectIds).includes(id));
+  }
+  projectRelatedCounts(id: number) {
+    const count = (sql: string) => (sqlite.prepare(sql).get(id) as { n: number }).n;
+    return {
+      cashflow: count("SELECT COUNT(*) AS n FROM cash_flow WHERE project_id = ?"),
+      investors: count("SELECT COUNT(*) AS n FROM investors WHERE project_id = ?"),
+      documents: count("SELECT COUNT(*) AS n FROM documents WHERE project_id = ?"),
+      tasks: count("SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?"),
+      loans: count("SELECT COUNT(*) AS n FROM arm_loans WHERE project_id = ?"),
+      contacts: this.contactsOnProject(id).length,
+    };
   }
   nextDealCode() {
     const prefix = `D-${new Date().getFullYear()}-`;
@@ -282,7 +327,12 @@ export class DatabaseStorage implements IStorage {
   getContacts() { return db.select().from(contacts).all(); }
   createContact(data: InsertContact) { return db.insert(contacts).values(data).returning().get(); }
   updateContact(id: number, data: Partial<InsertContact>) { return db.update(contacts).set(data).where(eq(contacts.id, id)).returning().get(); }
-  deleteContact(id: number) { db.delete(contacts).where(eq(contacts.id, id)).run(); }
+  deleteContact(id: number) {
+    sqlite.transaction(() => {
+      db.update(pipeline).set({ brokerContactId: null }).where(eq(pipeline.brokerContactId, id)).run();
+      db.delete(contacts).where(eq(contacts.id, id)).run();
+    })();
+  }
 
   // Investors
   getInvestors(projectId?: number) {

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useConfirm, plural } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Project, InsertProject } from "@shared/schema";
@@ -88,10 +89,28 @@ export default function Projects() {
     },
   });
 
+  const confirm = useConfirm();
+  async function confirmDelete(p: Project) {
+    let c: Record<string, number> = {};
+    try { c = await (await apiRequest("GET", `/api/projects/${p.id}/related`)).json(); } catch { /* show without counts */ }
+    const ok = await confirm({
+      title: `Delete ${p.name}?`,
+      alsoDeletes: [
+        plural(c.cashflow ?? 0, "cash flow entry", "cash flow entries"),
+        plural(c.investors ?? 0, "investor record"),
+        plural(c.documents ?? 0, "document link"),
+        plural(c.tasks ?? 0, "task"),
+        plural(c.loans ?? 0, "ARM loan"),
+      ].filter((x): x is string => !!x),
+      keeps: c.contacts ? [`${plural(c.contacts, "contact")} (removed from this project, not deleted)`] : [],
+      confirmLabel: "Delete project",
+    });
+    if (ok) remove.mutate(p.id);
+  }
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/projects/${id}`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/projects"] });
+      qc.invalidateQueries(); // related records on other tabs were deleted too
       toast({ title: "Project deleted" });
     },
   });
@@ -125,7 +144,7 @@ export default function Projects() {
                     <button onClick={() => openEdit(p)} className="p-1.5 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-foreground" data-testid={`button-edit-project-${p.id}`}>
                       <Pencil size={12} />
                     </button>
-                    <button onClick={() => remove.mutate(p.id)} className="p-1.5 hover:bg-destructive/10 rounded transition-colors text-muted-foreground hover:text-destructive" data-testid={`button-delete-project-${p.id}`}>
+                    <button onClick={() => confirmDelete(p)} className="p-1.5 hover:bg-destructive/10 rounded transition-colors text-muted-foreground hover:text-destructive" data-testid={`button-delete-project-${p.id}`}>
                       <Trash2 size={12} />
                     </button>
                   </div>

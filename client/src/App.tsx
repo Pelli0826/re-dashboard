@@ -1,5 +1,6 @@
 import { Switch, Route, Router } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
+import { ConfirmProvider } from "@/components/ConfirmDialog";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { queryClient } from "./lib/queryClient";
 import { Toaster } from "@/components/ui/toaster";
@@ -36,6 +37,7 @@ function AppInner() {
   }
 
   return (
+    <ConfirmProvider>
     <Router hook={useHashLocation}>
       <Layout>
         <Switch>
@@ -53,6 +55,7 @@ function AppInner() {
         </Switch>
       </Layout>
     </Router>
+    </ConfirmProvider>
   );
 }
 

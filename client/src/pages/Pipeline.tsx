@@ -25,6 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { useToast } from "@/hooks/use-toast";
+import { useConfirm, plural } from "@/components/ConfirmDialog";
 
 // ── Display helpers ─────────────────────────────────────────────────────────
 function fmtMoney(n: number | null | undefined): string {
@@ -203,10 +204,31 @@ export default function Pipeline() {
     moveStage.mutate({ id: deal.id, stage });
   }
 
+  const confirm = useConfirm();
   const remove = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/pipeline/${id}`),
-    onSuccess: () => { refresh(); setDetailId(null); toast({ title: "Deal deleted" }); },
+    onSuccess: () => {
+      qc.invalidateQueries(); // tasks and underwriting on other tabs were deleted too
+      setDetailId(null);
+      toast({ title: "Deal deleted" });
+    },
   });
+  async function confirmDelete(d: PipelineDeal) {
+    let c: Record<string, number> = {};
+    try { c = await (await apiRequest("GET", `/api/pipeline/${d.id}/related`)).json(); } catch { /* show without counts */ }
+    const ok = await confirm({
+      title: `Delete ${d.name}?`,
+      description: d.stage === "dead" || d.stage === "closed" ? undefined
+        : "To keep the history, you can mark it Dead instead: it moves off the board but stays searchable.",
+      alsoDeletes: [
+        plural(c.tasks ?? 0, "task"),
+        plural(c.underwriting ?? 0, "underwriting model"),
+        plural(c.activity ?? 0, "activity log entry", "activity log entries"),
+      ].filter((x): x is string => !!x),
+      confirmLabel: "Delete deal",
+    });
+    if (ok) remove.mutate(d.id);
+  }
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -451,7 +473,7 @@ export default function Pipeline() {
         broker={detailDeal?.brokerContactId ? contactMap[detailDeal.brokerContactId] : undefined}
         onClose={() => setDetailId(null)}
         onEdit={d => setFormDeal(d)}
-        onDelete={d => { if (confirm(`Delete ${d.name}? Its activity log is deleted too; its tasks are kept.`)) remove.mutate(d.id); }}
+        onDelete={confirmDelete}
         onStage={requestStage}
         stagePending={moveStage.isPending}
       />

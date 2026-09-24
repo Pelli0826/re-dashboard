@@ -128,6 +128,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!u) return res.status(404).json({ message: "Not found" });
     res.json(u);
   });
+  app.get("/api/projects/:id/related", (req, res) => res.json(storage.projectRelatedCounts(Number(req.params.id))));
   app.delete("/api/projects/:id", (req, res) => { storage.deleteProject(Number(req.params.id)); res.status(204).send(); });
 
   // ── System status & backup ─────────────────────────────────────────
@@ -208,6 +209,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(storage.getPipelineDeal(id));
   });
 
+  app.get("/api/pipeline/:id/related", (req, res) => res.json(storage.dealRelatedCounts(Number(req.params.id))));
   app.delete("/api/pipeline/:id", (req, res) => { storage.deletePipelineDeal(Number(req.params.id)); res.status(204).send(); });
 
   app.get("/api/pipeline/:id/activity", (req, res) => res.json(storage.getDealActivity(Number(req.params.id))));
