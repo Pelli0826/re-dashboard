@@ -5,7 +5,8 @@ import crypto from "crypto";
 import { z } from "zod";
 import { extractFromPdf, type DocType } from "./extract";
 import { buildDigest, sendDigest, digestStatus } from "./digest";
-import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES } from "./claude";
+import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES, askAboutDeal, type AskTurn } from "./claude";
+import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting";
 import { storage, DB_IS_PERSISTENT } from "./storage";
 import {
   STAGES, DEAL_TYPES, ACTIVITY_KINDS, STAGE_LABELS, daysSince, type Stage,
@@ -440,14 +441,124 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             (b.email && c.email?.toLowerCase() === b.email.toLowerCase()) ||
             (b.name && c.name.trim().toLowerCase() === b.name.trim().toLowerCase()))
         : undefined;
+      // Keep the PDF; it's attached to the deal when the review form is saved.
+      const saved = storage.saveDealFile(req.file.buffer, req.file.originalname, "application/pdf", null, "om");
       res.json({
         analysis,
         mathCheck: checks,
         memo: screeningMemo(analysis, checks, req.file.originalname),
         brokerContactId: match?.id ?? null,
+        fileId: saved.id,
       });
     } catch (err: any) {
       res.status(502).json({ message: err.message ?? "Could not read this OM." });
+    }
+  });
+
+  // ── Deal files ─────────────────────────────────────────────────────
+  const ALLOWED_TYPES: Record<string, string> = {
+    ".pdf": "application/pdf", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel", ".csv": "text/csv",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+  };
+  const fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PDF_BYTES } });
+
+  app.get("/api/pipeline/:id/files", (req, res) => res.json(storage.getDealFiles(Number(req.params.id))));
+  app.post("/api/pipeline/:id/files", (req, res, next) => {
+    fileUpload.single("file")(req, res, err => {
+      if (err?.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "Files are limited to 24 MB." });
+      if (err) return next(err);
+      next();
+    });
+  }, (req, res) => {
+    const id = Number(req.params.id);
+    if (!storage.getPipelineDeal(id)) return res.status(404).json({ message: "Deal not found" });
+    if (!req.file) return res.status(400).json({ message: "No file uploaded." });
+    const ext = (req.file.originalname.match(/\.[a-z0-9]+$/i)?.[0] ?? "").toLowerCase();
+    const mime = ALLOWED_TYPES[ext];
+    if (!mime) return res.status(400).json({ message: "Upload a PDF, Excel, CSV, Word or image file." });
+    const f = storage.saveDealFile(req.file.buffer, req.file.originalname, mime, id, "other");
+    storage.addDealActivity(id, new Date().toISOString().slice(0, 10), "note", `File added: ${f.name}`);
+    res.status(201).json(f);
+  });
+  app.patch("/api/files/:id", (req, res) => {
+    const dealId = Number(req.body?.dealId);
+    const f = storage.getDealFile(Number(req.params.id));
+    if (!f || !storage.getPipelineDeal(dealId)) return res.status(404).json({ message: "Not found" });
+    res.json(storage.attachDealFile(f.id, dealId));
+  });
+  app.get("/api/files/:id/download", (req, res) => {
+    const f = storage.getDealFile(Number(req.params.id));
+    if (!f) return res.status(404).json({ message: "Not found" });
+    let data: Buffer;
+    try { data = storage.readDealFile(f); } catch { return res.status(410).json({ message: "This file is missing from storage." }); }
+    res.setHeader("Content-Type", f.mime);
+    res.setHeader("Content-Disposition", `${req.query.inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+    res.send(data);
+  });
+  app.delete("/api/files/:id", (req, res) => { storage.deleteDealFile(Number(req.params.id)); res.status(204).send(); });
+
+  storage.cleanupPendingFiles();
+  setInterval(() => storage.cleanupPendingFiles(), 6 * 3_600_000);
+
+  // ── Ask about a deal ───────────────────────────────────────────────
+  function dealContext(deal: PipelineDeal): string {
+    const broker = deal.brokerContactId ? storage.getContacts().find(c => c.id === deal.brokerContactId) : undefined;
+    const record: Record<string, unknown> = { ...deal };
+    for (const k of ["id", "brokerContactId", "stageChangedAt", "lastActivityAt", "updatedAt"]) delete record[k];
+    for (const k of Object.keys(record)) if (record[k] == null || record[k] === "") delete record[k];
+    record.stage = STAGE_LABELS[deal.stage as Stage] ?? deal.stage;
+    if (broker) record.broker = [broker.name, broker.company, broker.phone, broker.email].filter(Boolean).join(", ");
+
+    const activity = storage.getDealActivity(deal.id).slice(0, 60)
+      .map(a => `${a.date} [${a.kind}] ${a.summary}`).join("\n") || "(none)";
+    const tasks = storage.getTasks().filter(t => t.dealId === deal.id)
+      .map(t => `${t.status === "done" ? "[done]" : "[open]"} ${t.title}${t.dueDate ? ` (due ${t.dueDate})` : ""}`).join("\n") || "(none)";
+    const models = storage.getUnderwritingDeals().filter(m => m.dealId === deal.id).map(m => {
+      const { id: _i, dealId: _d, createdAt: _c, ...inputs } = m;
+      let out = `Model "${m.name}" inputs: ${JSON.stringify(inputs)}`;
+      if (m.purchasePrice > 0 && m.grossPotentialRent > 0) {
+        const r = calcReturns(m, buildProforma(m));
+        const max15 = maxPriceForIrr(m, 15);
+        out += `\nCalculated: levered IRR ${r.irr.toFixed(1)}%, equity multiple ${r.equityMultiple.toFixed(2)}x, `
+          + `year-1 yield on cost ${r.yr1CapRate.toFixed(2)}%, year-1 cash-on-cash ${r.yr1CoC.toFixed(1)}%, `
+          + `year-1 DSCR ${r.yr1Dscr.toFixed(2)}x, equity $${Math.round(r.equity).toLocaleString()}, `
+          + `max price for 15% IRR (loan at same LTV) ${max15 ? `$${max15.toLocaleString()}` : "not reachable"}`;
+      }
+      return out;
+    }).join("\n\n") || "(no underwriting model)";
+    return `DEAL RECORD\n${JSON.stringify(record, null, 1)}\n\nACTIVITY LOG (newest first)\n${activity}\n\nTASKS\n${tasks}\n\nUNDERWRITING\n${models}`;
+  }
+
+  app.post("/api/pipeline/:id/ask", async (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    if (!claudeConfigured()) return res.status(400).json({ message: "Set ANTHROPIC_API_KEY in Railway to ask questions." });
+    const parsed = z.object({
+      question: z.string().trim().min(1).max(4000),
+      history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(20000) })).max(20).default([]),
+    }).safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: readable(parsed.error) });
+
+    // Newest PDFs first, up to the per-request size budget.
+    const pdfs: { name: string; data: Buffer }[] = [];
+    const skipped: string[] = [];
+    let budget = MAX_PDF_BYTES;
+    for (const f of storage.getDealFiles(deal.id).filter(f => f.mime === "application/pdf")) {
+      if (f.size > budget) { skipped.push(f.name); continue; }
+      try { pdfs.push({ name: f.name, data: storage.readDealFile(f) }); budget -= f.size; } catch { skipped.push(f.name); }
+    }
+    let context = dealContext(deal);
+    const nonPdf = storage.getDealFiles(deal.id).filter(f => f.mime !== "application/pdf").map(f => f.name);
+    if (nonPdf.length) context += `\n\nOther files saved (not readable here): ${nonPdf.join(", ")}`;
+    if (skipped.length) context += `\n\nPDFs not included (over the size limit): ${skipped.join(", ")}`;
+
+    try {
+      const answer = await askAboutDeal({ context, pdfs, history: parsed.data.history as AskTurn[], question: parsed.data.question });
+      res.json({ answer, filesUsed: pdfs.map(p => p.name), filesSkipped: skipped });
+    } catch (err: any) {
+      res.status(502).json({ message: err.message ?? "Could not get an answer." });
     }
   });
 

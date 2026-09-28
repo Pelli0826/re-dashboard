@@ -50,7 +50,17 @@ to download every table as one JSON file. Do this before any change to the Railw
   matches or adds the listing broker, runs NOI and cap-rate math checks in code, and saves a
   screening memo (risks, missing info, broker questions) to the deal's activity log. For income
   properties it can also start an Underwriting model.
+- **Files**: OMs from Upload OM are saved with the deal on the volume; add rent rolls, T12s,
+  surveys and so on from the deal panel. Deleting a deal deletes its files. Note: the Download
+  backup file lists files but doesn't contain them; they stay on the Railway volume.
+- **Ask about this deal**: Claude answers from the deal's saved PDFs, record, activity log, tasks
+  and underwriting, citing its sources. Answers can be saved to the activity log.
 - Vocabulary (stages, types, sources, default probabilities) lives in `shared/pipeline.ts`.
+
+## Underwriting: maximum price
+Each model shows the highest price that still meets a target levered IRR (default 15%), with the
+loan held at the same LTV or the same dollar amount, plus a price sensitivity table. For models
+linked to a deal, "Set as our offer" updates the deal (and the model follows).
 
 ## Local development
 ```bash

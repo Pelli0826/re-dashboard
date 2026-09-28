@@ -1,14 +1,15 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import fs from "fs";
+import crypto from "crypto";
 import path from "path";
 import {
-  projects, pipeline, dealActivity, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
+  projects, pipeline, dealActivity, dealFiles, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
 } from "@shared/schema";
 import type {
   Project, InsertProject,
   PipelineDeal, InsertPipeline,
-  DealActivity,
+  DealActivity, DealFile,
   ArmLoan, InsertArmLoan,
   CashFlowEntry, InsertCashFlow,
   Contact, InsertContact,
@@ -35,6 +36,10 @@ if (!DB_IS_PERSISTENT) {
   console.warn("[db] WARNING: no Railway volume or DB_PATH detected. Data will be lost on the next deploy.");
 }
 const sqlite = new Database(DB_PATH);
+
+// Uploaded files live next to the database, on the volume.
+export const FILES_DIR = path.join(DATA_DIR, "files");
+fs.mkdirSync(FILES_DIR, { recursive: true });
 sqlite.pragma("journal_mode = WAL");
 const db = drizzle(sqlite);
 
@@ -70,6 +75,13 @@ sqlite.exec(`
     summary TEXT NOT NULL, created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_deal_activity_deal ON deal_activity(deal_id);
+  CREATE TABLE IF NOT EXISTS deal_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER, name TEXT NOT NULL, stored_name TEXT NOT NULL,
+    mime TEXT NOT NULL, size INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'other',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_deal_files_deal ON deal_files(deal_id);
   CREATE TABLE IF NOT EXISTS arm_loans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     loan_name TEXT NOT NULL, project_id INTEGER, lender TEXT NOT NULL,
@@ -127,6 +139,10 @@ sqlite.exec(`
   );
 `);
 
+function removeStoredFile(storedName: string) {
+  try { fs.unlinkSync(path.join(FILES_DIR, path.basename(storedName))); } catch { /* already gone */ }
+}
+
 function parseIds(raw: string | null | undefined): number[] {
   if (!raw) return [];
   try { const v = JSON.parse(raw); return Array.isArray(v) ? v.map(Number) : []; } catch { return []; }
@@ -182,6 +198,13 @@ export interface IStorage {
   updatePipelineDeal(id: number, data: Partial<PipelineDeal>): PipelineDeal | undefined;
   deletePipelineDeal(id: number): void;
   nextDealCode(): string;
+  saveDealFile(buffer: Buffer, name: string, mime: string, dealId: number | null, kind: string): DealFile;
+  getDealFiles(dealId: number): DealFile[];
+  getDealFile(id: number): DealFile | undefined;
+  readDealFile(f: DealFile): Buffer;
+  attachDealFile(id: number, dealId: number): DealFile | undefined;
+  deleteDealFile(id: number): void;
+  cleanupPendingFiles(): void;
   getDealActivity(dealId: number): DealActivity[];
   addDealActivity(dealId: number, date: string, kind: string, summary: string): DealActivity;
   // ARM
@@ -247,19 +270,54 @@ export class DatabaseStorage implements IStorage {
   }
   // Deleting a deal removes everything that belongs to it.
   deletePipelineDeal(id: number) {
+    const files = db.select().from(dealFiles).where(eq(dealFiles.dealId, id)).all();
     sqlite.transaction(() => {
+      db.delete(dealFiles).where(eq(dealFiles.dealId, id)).run();
       db.delete(dealActivity).where(eq(dealActivity.dealId, id)).run();
       db.delete(tasks).where(eq(tasks.dealId, id)).run();
       db.delete(underwriting).where(eq(underwriting.dealId, id)).run();
       db.delete(pipeline).where(eq(pipeline.id, id)).run();
     })();
+    for (const f of files) removeStoredFile(f.storedName);
   }
+
+  // ── Deal files ──
+  saveDealFile(buffer: Buffer, name: string, mime: string, dealId: number | null, kind: string): DealFile {
+    const storedName = `${crypto.randomUUID()}${path.extname(name).toLowerCase().slice(0, 8)}`;
+    fs.writeFileSync(path.join(FILES_DIR, storedName), buffer);
+    return db.insert(dealFiles).values({
+      dealId, name: name.slice(0, 200), storedName, mime, size: buffer.length, kind, createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  getDealFiles(dealId: number) {
+    return db.select().from(dealFiles).where(eq(dealFiles.dealId, dealId)).orderBy(desc(dealFiles.createdAt)).all();
+  }
+  getDealFile(id: number) { return db.select().from(dealFiles).where(eq(dealFiles.id, id)).get(); }
+  readDealFile(f: DealFile): Buffer { return fs.readFileSync(path.join(FILES_DIR, f.storedName)); }
+  attachDealFile(id: number, dealId: number) {
+    return db.update(dealFiles).set({ dealId }).where(eq(dealFiles.id, id)).returning().get();
+  }
+  deleteDealFile(id: number) {
+    const f = this.getDealFile(id);
+    if (!f) return;
+    db.delete(dealFiles).where(eq(dealFiles.id, id)).run();
+    removeStoredFile(f.storedName);
+  }
+  // OM uploads that were never saved as a deal are removed after a day.
+  cleanupPendingFiles() {
+    const cutoff = new Date(Date.now() - 86_400_000).toISOString();
+    const stale = sqlite.prepare("SELECT id FROM deal_files WHERE deal_id IS NULL AND created_at < ?").all(cutoff) as { id: number }[];
+    for (const f of stale) this.deleteDealFile(f.id);
+    if (stale.length) console.log(`[files] removed ${stale.length} unsaved upload(s)`);
+  }
+
   dealRelatedCounts(id: number) {
     const count = (sql: string) => (sqlite.prepare(sql).get(id) as { n: number }).n;
     return {
       tasks: count("SELECT COUNT(*) AS n FROM tasks WHERE deal_id = ?"),
       underwriting: count("SELECT COUNT(*) AS n FROM underwriting WHERE deal_id = ?"),
       activity: count("SELECT COUNT(*) AS n FROM deal_activity WHERE deal_id = ?"),
+      files: count("SELECT COUNT(*) AS n FROM deal_files WHERE deal_id = ?"),
     };
   }
   // Deleting a project removes its cash flow, investors, documents, tasks and loans,
@@ -292,11 +350,16 @@ export class DatabaseStorage implements IStorage {
       contacts: this.contactsOnProject(id).length,
     };
   }
+  // IDs are never reused, even after a deal is deleted (the highest issued number is remembered).
   nextDealCode() {
-    const prefix = `D-${new Date().getFullYear()}-`;
+    const year = new Date().getFullYear();
+    const prefix = `D-${year}-`;
     const rows = db.select({ code: pipeline.dealCode }).from(pipeline).where(like(pipeline.dealCode, `${prefix}%`)).all();
-    const max = rows.reduce((m, r) => Math.max(m, parseInt(r.code.slice(prefix.length), 10) || 0), 0);
-    return `${prefix}${String(max + 1).padStart(3, "0")}`;
+    const maxExisting = rows.reduce((m, r) => Math.max(m, parseInt(r.code.slice(prefix.length), 10) || 0), 0);
+    const maxIssued = parseInt(getState(`dealCode:${year}`) ?? "0", 10) || 0;
+    const next = Math.max(maxExisting, maxIssued) + 1;
+    setState(`dealCode:${year}`, String(next));
+    return `${prefix}${String(next).padStart(3, "0")}`;
   }
   getDealActivity(dealId: number) {
     return db.select().from(dealActivity).where(eq(dealActivity.dealId, dealId))
@@ -310,7 +373,7 @@ export class DatabaseStorage implements IStorage {
   }
   // Full export of every table, for the Download backup button.
   exportAll() {
-    const tables = ["projects", "deals", "deal_activity", "arm_loans", "cash_flow", "contacts",
+    const tables = ["projects", "deals", "deal_activity", "deal_files", "arm_loans", "cash_flow", "contacts",
       "investors", "documents", "tasks", "underwriting"];
     const out: Record<string, unknown[]> = {};
     for (const t of tables) out[t] = sqlite.prepare(`SELECT * FROM ${t}`).all();

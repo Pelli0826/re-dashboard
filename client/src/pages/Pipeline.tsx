@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { PipelineDeal, Contact, DealActivity, Task, UnderwritingDeal } from "@shared/schema";
-import { buildProforma, calcReturns } from "@shared/underwriting";
+import type { PipelineDeal, Contact, DealActivity, Task, UnderwritingDeal, DealFile } from "@shared/schema";
+import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting";
 import { useLocation } from "wouter";
 import {
   STAGES, ACTIVE_STAGES, STAGE_LABELS, DEAL_TYPES, DEAL_TYPE_LABELS, SOURCES, SOURCE_LABELS,
@@ -12,7 +12,7 @@ import {
   type Stage, type DevelopmentScenario, type Deadline,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -89,7 +89,7 @@ interface OmAnalysis {
   scenarios?: DevelopmentScenario[];
   summary: string; keyRisks: string[]; missingInfo: string[]; brokerQuestions: string[];
 }
-interface Intake { analysis: OmAnalysis; mathCheck: string[]; memo: string; brokerContactId: number | null; fileName: string }
+interface Intake { analysis: OmAnalysis; mathCheck: string[]; memo: string; brokerContactId: number | null; fileName: string; fileId?: number }
 
 function TempBadge({ t }: { t: string }) {
   return (
@@ -189,6 +189,7 @@ export default function Pipeline() {
         plural(c.tasks ?? 0, "task"),
         plural(c.underwriting ?? 0, "underwriting model"),
         plural(c.activity ?? 0, "activity log entry", "activity log entries"),
+        plural(c.files ?? 0, "saved file"),
       ].filter((x): x is string => !!x),
       confirmLabel: "Delete deal",
     });
@@ -543,6 +544,7 @@ function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
                 <Fact label="Yr 1 yield on cost" value={`${r.yr1CapRate.toFixed(2)}%`} />
                 <Fact label="Yr 1 cash-on-cash" value={`${r.yr1CoC.toFixed(1)}%`} />
                 <Fact label="Yr 1 DSCR" value={m.loanAmount > 0 ? `${r.yr1Dscr.toFixed(2)}x` : "No loan"} />
+                <Fact label="Max price for 15% IRR" value={(() => { const p = maxPriceForIrr(m, 15); return p ? fmtMoney(p) : "Not reachable"; })()} />
               </>}
             </dl>
             {!r && <p className="text-xs text-muted-foreground">Add rents, expenses and financing in the model to see returns.</p>}
@@ -550,6 +552,152 @@ function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
           </div>
         );
       })}
+    </section>
+  );
+}
+
+// ── Files saved to the deal ────────────────────────────────────────────────
+function fmtSize(n: number) { return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`; }
+
+function DealFiles({ deal }: { deal: PipelineDeal }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const input = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const key = ["/api/pipeline", deal.id, "files"];
+  const { data: files = [] } = useQuery<DealFile[]>({ queryKey: key });
+
+  async function upload(file: File) {
+    setUploading(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch(`/api/pipeline/${deal.id}/files`, { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message ?? `Upload failed (${res.status})`);
+      qc.invalidateQueries({ queryKey: key });
+      qc.invalidateQueries({ queryKey: ["/api/pipeline", deal.id, "activity"] });
+      toast({ title: "File saved to the deal" });
+    } catch (e: any) {
+      toast({ title: "Could not upload", description: e.message, variant: "destructive" });
+    } finally {
+      setUploading(false);
+      if (input.current) input.current.value = "";
+    }
+  }
+  const remove = useMutation({
+    mutationFn: (id: number) => apiRequest("DELETE", `/api/files/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: key }),
+  });
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-foreground">Files</h3>
+        <input ref={input} type="file" className="hidden" accept=".pdf,.xlsx,.xls,.csv,.docx,.png,.jpg,.jpeg" onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); }} />
+        <Button size="sm" variant="ghost" className="gap-1 h-7" disabled={uploading} onClick={() => input.current?.click()}>
+          {uploading ? <Loader2 size={13} className="animate-spin" /> : <Paperclip size={13} />} Add file
+        </Button>
+      </div>
+      {files.length === 0
+        ? <p className="text-sm text-muted-foreground">No files yet. OMs uploaded through Upload OM are saved here automatically.</p>
+        : (
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {files.map(f => (
+              <li key={f.id} className="flex items-center gap-2 px-3 py-2 text-sm">
+                <a href={`/api/files/${f.id}/download${f.mime === "application/pdf" ? "?inline=1" : ""}`} target="_blank" rel="noopener" className="text-foreground hover:underline truncate">{f.name}</a>
+                {f.kind === "om" && <span className="text-[11px] px-1.5 rounded bg-muted text-muted-foreground">OM</span>}
+                <span className="ml-auto text-xs text-muted-foreground whitespace-nowrap">{fmtSize(f.size)}</span>
+                <a href={`/api/files/${f.id}/download`} aria-label={`Download ${f.name}`} className="p-1 text-muted-foreground hover:text-foreground"><Download size={13} /></a>
+                <button aria-label={`Delete ${f.name}`} className="p-1 text-muted-foreground hover:text-destructive"
+                  onClick={async () => { if (await confirm({ title: `Delete ${f.name}?` })) remove.mutate(f.id); }}>
+                  <Trash2 size={13} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+    </section>
+  );
+}
+
+// ── Ask about this deal ─────────────────────────────────────────────────────
+interface QA { question: string; answer: string; filesUsed: string[]; saved?: boolean }
+const SUGGESTED = [
+  "Summarize this deal for my partner",
+  "What are the biggest risks, and what would resolve them?",
+  "What has the broker told us so far?",
+  "What should we ask for before submitting an LOI?",
+];
+
+function AskDeal({ deal }: { deal: PipelineDeal }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [question, setQuestion] = useState("");
+  const [thread, setThread] = useState<QA[]>([]);
+  const { data: system } = useQuery<{ omIntake?: boolean }>({ queryKey: ["/api/system"] });
+
+  const ask = useMutation({
+    mutationFn: async (q: string) => {
+      const history = thread.flatMap(t => [{ role: "user", content: t.question }, { role: "assistant", content: t.answer }]);
+      const res = await apiRequest("POST", `/api/pipeline/${deal.id}/ask`, { question: q, history });
+      return { question: q, ...(await res.json()) } as QA;
+    },
+    onSuccess: qa => { setThread(t => [...t, qa]); setQuestion(""); },
+    onError: (e: Error) => toast({ title: "Could not get an answer", description: e.message.replace(/^\d+:\s*/, "").replace(/^\{"message":"|"\}$/g, ""), variant: "destructive" }),
+  });
+  const save = useMutation({
+    mutationFn: (i: number) => apiRequest("POST", `/api/pipeline/${deal.id}/activity`, {
+      kind: "note", date: today(), summary: `Q: ${thread[i].question}\n\n${thread[i].answer}`,
+    }),
+    onSuccess: (_r, i) => {
+      setThread(t => t.map((x, j) => j === i ? { ...x, saved: true } : x));
+      qc.invalidateQueries({ queryKey: ["/api/pipeline", deal.id, "activity"] });
+      qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
+    },
+  });
+  const submit = (q: string) => { if (q.trim() && !ask.isPending) ask.mutate(q.trim()); };
+
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5"><MessageSquare size={14} /> Ask about this deal</h3>
+      {!system?.omIntake ? (
+        <p className="text-sm text-muted-foreground">Add ANTHROPIC_API_KEY in Railway to turn this on.</p>
+      ) : (
+        <>
+          <p className="text-xs text-muted-foreground">Claude answers from this deal's saved PDFs, notes, activity log, tasks and underwriting, and says where each answer comes from.</p>
+          {thread.map((t, i) => (
+            <div key={i} className="space-y-1.5">
+              <p className="text-sm font-medium text-foreground">{t.question}</p>
+              <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-foreground whitespace-pre-line">{t.answer}</div>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <span>{t.filesUsed.length ? `Read: ${t.filesUsed.join(", ")}` : "No PDFs on this deal; answered from dashboard data"}</span>
+                <button className="ml-auto hover:text-foreground disabled:opacity-60" disabled={t.saved || save.isPending} onClick={() => save.mutate(i)}>
+                  {t.saved ? "Saved to activity" : "Save to activity log"}
+                </button>
+              </div>
+            </div>
+          ))}
+          {thread.length === 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {SUGGESTED.map(q => (
+                <button key={q} onClick={() => submit(q)} disabled={ask.isPending}
+                  className="text-xs rounded-full border border-border px-2.5 py-1 text-muted-foreground hover:text-foreground hover:bg-muted/50">{q}</button>
+              ))}
+            </div>
+          )}
+          <form className="flex gap-2 items-end" onSubmit={e => { e.preventDefault(); submit(question); }}>
+            <Textarea rows={2} value={question} onChange={e => setQuestion(e.target.value)} aria-label="Question about this deal"
+              placeholder={thread.length ? "Ask a follow-up" : "e.g. What did the OM say about sewer capacity?"}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(question); } }} />
+            <Button type="submit" size="icon" disabled={!question.trim() || ask.isPending} aria-label="Ask">
+              {ask.isPending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+            </Button>
+          </form>
+          {ask.isPending && <p className="text-xs text-muted-foreground">Reading the deal materials. Usually 10 to 40 seconds.</p>}
+        </>
+      )}
     </section>
   );
 }
@@ -716,6 +864,10 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
 
             <UnderwritingSummary deal={deal} />
 
+            <DealFiles deal={deal} />
+
+            <AskDeal key={deal.id} deal={deal} />
+
             {(deal.keyRisks || deal.notes) && (
               <section className="space-y-2">
                 {deal.keyRisks && <><h3 className="text-sm font-semibold text-foreground">Key risks</h3><p className="text-sm text-foreground whitespace-pre-line">{deal.keyRisks}</p></>}
@@ -881,6 +1033,7 @@ function DealFormDialog({ deal, intake, contacts, onClose, onSaved }: {
       if (!deal && intake && a) {
         // Keep Claude's screening with the deal, then optionally start an underwriting model.
         await apiRequest("POST", `/api/pipeline/${saved.id}/activity`, { kind: "note", date: today(), summary: intake.memo });
+        if (intake.fileId) await apiRequest("PATCH", `/api/files/${intake.fileId}`, { dealId: saved.id });
         if (createUw) {
           await apiRequest("POST", "/api/underwriting", {
             name: `${saved.dealCode} ${saved.name}`,

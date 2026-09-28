@@ -15,27 +15,10 @@ export function claudeConfigured(): boolean {
 
 interface ToolDef { name: string; description: string; input_schema: Record<string, unknown> }
 
-async function callClaude(pdf: Buffer, prompt: string, tool?: ToolDef, maxTokens = 4096): Promise<any> {
+// Low-level request with timeout and readable errors. Returns the API's JSON response.
+async function postMessages(body: Record<string, unknown>): Promise<any> {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is not set in Railway.");
-  if (pdf.length > MAX_PDF_BYTES) {
-    throw new Error(`This PDF is ${(pdf.length / 1048576).toFixed(0)} MB. The limit is 24 MB. Compress it (Preview: File → Export → Reduce File Size) or upload the financial section only.`);
-  }
-
-  const body: Record<string, unknown> = {
-    model: process.env.ANTHROPIC_MODEL || DEFAULT_MODEL,
-    max_tokens: maxTokens,
-    messages: [{
-      role: "user",
-      content: [
-        { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdf.toString("base64") } },
-        { type: "text", text: prompt },
-      ],
-    }],
-  };
-  if (tool) {
-    body.tools = [tool];
-    body.tool_choice = { type: "tool", name: tool.name };
-  }
+  body.model = body.model ?? (process.env.ANTHROPIC_MODEL || DEFAULT_MODEL);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 240_000);
@@ -52,26 +35,68 @@ async function callClaude(pdf: Buffer, prompt: string, tool?: ToolDef, maxTokens
       signal: controller.signal,
     });
   } catch (err: any) {
-    throw new Error(err?.name === "AbortError" ? "Claude took too long to read this PDF. Try again, or upload a shorter file." : "Could not reach the Claude API.");
+    throw new Error(err?.name === "AbortError" ? "Claude took too long to respond. Try again, or use a shorter file." : "Could not reach the Claude API.");
   } finally {
     clearTimeout(timer);
   }
 
   if (!res.ok) {
+    // Show Anthropic's actual reason instead of guessing.
     const detail = await res.text().catch(() => "");
-    const messages: Record<number, string> = {
-      400: "Claude could not read this PDF. Make sure it is not password-protected.",
-      401: "The ANTHROPIC_API_KEY in Railway is not valid.",
+    let apiMessage = "";
+    try { apiMessage = JSON.parse(detail)?.error?.message ?? ""; } catch { /* not JSON */ }
+    console.error(`[claude] ${res.status}: ${detail.slice(0, 500)}`);
+    const m = apiMessage.toLowerCase();
+    if (m.includes("credit balance")) {
+      throw new Error("Your Anthropic account has no API credits. Add credits at console.anthropic.com → Billing, then try again.");
+    }
+    if (m.includes("workspace")) {
+      throw new Error("This Anthropic API key isn't assigned to a workspace. Create a new key inside a workspace at console.anthropic.com and replace ANTHROPIC_API_KEY in Railway.");
+    }
+    if (m.includes("model")) {
+      throw new Error(`Anthropic did not accept the model name "${body.model}". Check the ANTHROPIC_MODEL variable in Railway, or delete it to use the default. (${apiMessage})`);
+    }
+    if (m.includes("page")) {
+      throw new Error(`A PDF has too many pages for one request. Use the summary and financial sections only. (${apiMessage})`);
+    }
+    if (m.includes("password") || m.includes("encrypt")) {
+      throw new Error("A PDF is password-protected. Open it, save an unprotected copy, and upload that.");
+    }
+    const byStatus: Record<number, string> = {
+      401: "The ANTHROPIC_API_KEY in Railway is not valid. Copy the key again from console.anthropic.com.",
       403: "The Anthropic API key does not have access to this model.",
-      413: "This PDF is too large for one request. Compress it or upload the financial section only.",
+      413: "The files are too large for one request. Compress them or remove some.",
       429: "Claude API rate limit reached. Wait a minute and try again.",
       529: "Claude is temporarily overloaded. Try again in a minute.",
     };
-    console.error(`[claude] ${res.status}: ${detail.slice(0, 300)}`);
-    throw new Error(messages[res.status] ?? `Claude API error (${res.status}).`);
+    throw new Error(byStatus[res.status] ?? `Claude API error ${res.status}${apiMessage ? `: ${apiMessage}` : ""}`);
   }
+  return res.json();
+}
 
-  const data = await res.json();
+const pdfBlock = (pdf: Buffer, cache = false) => ({
+  type: "document",
+  source: { type: "base64", media_type: "application/pdf", data: pdf.toString("base64") },
+  ...(cache ? { cache_control: { type: "ephemeral" } } : {}),
+});
+
+function checkSize(pdf: Buffer) {
+  if (pdf.length > MAX_PDF_BYTES) {
+    throw new Error(`This PDF is ${(pdf.length / 1048576).toFixed(0)} MB. The limit is 24 MB. Compress it (Preview: File → Export → Reduce File Size) or upload the financial section only.`);
+  }
+}
+
+async function callClaude(pdf: Buffer, prompt: string, tool?: ToolDef, maxTokens = 4096): Promise<any> {
+  checkSize(pdf);
+  const body: Record<string, unknown> = {
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content: [pdfBlock(pdf), { type: "text", text: prompt }] }],
+  };
+  if (tool) {
+    body.tools = [tool];
+    body.tool_choice = { type: "tool", name: tool.name };
+  }
+  const data = await postMessages(body);
   if (tool) {
     const block = (data.content ?? []).find((b: any) => b.type === "tool_use");
     if (!block) throw new Error("Claude did not return structured results. Try again.");
@@ -79,6 +104,38 @@ async function callClaude(pdf: Buffer, prompt: string, tool?: ToolDef, maxTokens
   }
   const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
   return JSON.parse(text.replace(/```json|```/g, "").trim() || "{}");
+}
+
+// ── Ask about a deal ──────────────────────────────────────────────────────
+export interface AskTurn { role: "user" | "assistant"; content: string }
+
+const ASK_SYSTEM = `You are an acquisitions analyst answering questions about one commercial real estate deal for its investors.
+
+You are given the deal record, activity log, tasks and underwriting from the firm's dashboard, plus any PDFs saved to the deal (offering memoranda, rent rolls, P&Ls).
+
+Rules:
+- Answer only from the materials provided. If the answer isn't there, say so plainly and suggest who or what could answer it (e.g. ask the broker, order a survey).
+- Say where each fact comes from: the OM (with page number when you can), the activity log (with date), the deal record, or the underwriting model.
+- Use the underwriting figures exactly as given; they are calculated by the dashboard. Don't recompute returns with different assumptions unless asked, and label any of your own arithmetic as an estimate.
+- Be concise and direct. Plain text, short paragraphs; use a short list only when listing several items.`;
+
+export async function askAboutDeal(opts: {
+  context: string; pdfs: { name: string; data: Buffer }[]; history: AskTurn[]; question: string;
+}): Promise<string> {
+  const docs = opts.pdfs.flatMap((p, i) => [
+    { type: "text", text: `File: ${p.name}` },
+    pdfBlock(p.data, i === opts.pdfs.length - 1), // cache the files so follow-up questions are cheaper
+  ]);
+  const messages: any[] = [
+    { role: "user", content: [...docs, { type: "text", text: `Dashboard data for this deal:\n\n${opts.context}` }] },
+    { role: "assistant", content: "I have the deal materials. What would you like to know?" },
+    ...opts.history.slice(-8).map(t => ({ role: t.role, content: t.content })),
+    { role: "user", content: opts.question },
+  ];
+  const data = await postMessages({ system: ASK_SYSTEM, max_tokens: 2000, messages });
+  const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
+  if (!text) throw new Error("Claude returned an empty answer. Try rephrasing the question.");
+  return text;
 }
 
 // Used by the Underwriting page's existing per-document upload (om / rentroll / pl prompts).

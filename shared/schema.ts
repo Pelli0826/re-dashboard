@@ -91,6 +91,19 @@ export const insertPipelineSchema = createInsertSchema(pipeline).omit({
 export type InsertPipeline = z.infer<typeof insertPipelineSchema>;
 export type PipelineDeal = typeof pipeline.$inferSelect;
 
+// ─── Deal Files (OMs, rent rolls, etc. stored on the volume) ───────────────
+export const dealFiles = sqliteTable("deal_files", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealId: integer("deal_id"),                        // null while an OM upload is awaiting review
+  name: text("name").notNull(),                      // original file name
+  storedName: text("stored_name").notNull(),         // random name on disk
+  mime: text("mime").notNull(),
+  size: integer("size").notNull(),
+  kind: text("kind").notNull().default("other"),     // om | other
+  createdAt: text("created_at").notNull(),
+});
+export type DealFile = typeof dealFiles.$inferSelect;
+
 // ─── Deal Activity Log ─────────────────────────────────────────────────────
 export const dealActivity = sqliteTable("deal_activity", {
   id: integer("id").primaryKey({ autoIncrement: true }),

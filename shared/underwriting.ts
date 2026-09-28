@@ -36,17 +36,29 @@ function calcNPV(rate: number, cashFlows: number[]): number {
 }
 
 export function calcIRR(cashFlows: number[], guess = 0.1): number {
-  // Newton-Raphson with initial equity outflow at t=0
+  const npvAt = (r: number) => cashFlows.reduce((acc, cf, t) => acc + cf / Math.pow(1 + r, t), 0);
+  // Newton-Raphson first (fast)...
   let r = guess;
   for (let i = 0; i < 100; i++) {
-    const npv = cashFlows.reduce((acc, cf, t) => acc + cf / Math.pow(1 + r, t), 0);
+    const npv = npvAt(r);
     const dnpv = cashFlows.reduce((acc, cf, t) => acc - t * cf / Math.pow(1 + r, t + 1), 0);
     if (Math.abs(dnpv) < 1e-10) break;
     const rNew = r - npv / dnpv;
     if (Math.abs(rNew - r) < 1e-8) { r = rNew; break; }
     r = rNew;
   }
-  return isFinite(r) ? r : 0;
+  const scale = Math.max(1, Math.abs(cashFlows[0] ?? 1));
+  if (isFinite(r) && r > -0.99 && Math.abs(npvAt(r)) < 1e-6 * scale) return r;
+  // ...then bisection, which always converges when a root exists in range.
+  let lo = -0.99, hi = 10;
+  let fLo = npvAt(lo), fHi = npvAt(hi);
+  if (!isFinite(fLo) || !isFinite(fHi) || fLo * fHi > 0) return 0;
+  for (let i = 0; i < 200; i++) {
+    const mid = (lo + hi) / 2, fMid = npvAt(mid);
+    if (Math.abs(fMid) < 1e-9 * scale || hi - lo < 1e-10) return mid;
+    if (fLo * fMid < 0) { hi = mid; fHi = fMid; } else { lo = mid; fLo = fMid; }
+  }
+  return (lo + hi) / 2;
 }
 
 export interface ProformaYear {
@@ -125,3 +137,41 @@ export function calcReturns(d: UnderwritingDeal, proforma: ProformaYear[]) {
   return { totalCost, equity, exitValue, netExitProceeds, yr1CapRate, yr1CoC, yr1Dscr, irr, equityMultiple };
 }
 
+
+// ── Price solver ─────────────────────────────────────────────────────────
+// Reprice a model. "ltv" keeps the loan at the same % of price (typical lender sizing);
+// "fixed" keeps the dollar loan amount. Equity is always re-derived from cost minus loan.
+export type LoanMode = "ltv" | "fixed";
+
+export function atPrice(d: UnderwritingDeal, price: number, mode: LoanMode): UnderwritingDeal {
+  const ltv = d.purchasePrice > 0 ? d.loanAmount / d.purchasePrice : 0;
+  return { ...d, purchasePrice: price, loanAmount: mode === "ltv" ? price * ltv : d.loanAmount, equityIn: 0 };
+}
+
+export function returnsAtPrice(d: UnderwritingDeal, price: number, mode: LoanMode) {
+  const m = atPrice(d, price, mode);
+  return { price, loanAmount: m.loanAmount, ...calcReturns(m, buildProforma(m)) };
+}
+
+/** Highest price that still meets targetIrrPct (levered). null if even a very low price can't reach it. */
+export function maxPriceForIrr(d: UnderwritingDeal, targetIrrPct: number, mode: LoanMode = "ltv"): number | null {
+  if (d.purchasePrice <= 0 || d.grossPotentialRent <= 0) return null;
+  const irrAt = (p: number) => {
+    const r = returnsAtPrice(d, p, mode);
+    return r.equity > 0 ? r.irr : Infinity; // no equity in = infinite return
+  };
+  let lo = d.purchasePrice * 0.05, hi = d.purchasePrice * 3;
+  if (irrAt(lo) < targetIrrPct) return null;       // unreachable
+  if (irrAt(hi) >= targetIrrPct) return hi;        // beats target even at 3x today's price
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (irrAt(mid) >= targetIrrPct) lo = mid; else hi = mid;
+    if (hi - lo < 500) break;
+  }
+  return Math.floor(lo / 1000) * 1000; // round down to the nearest $1,000
+}
+
+/** Returns at a range of prices around the model's current price. */
+export function priceSensitivity(d: UnderwritingDeal, mode: LoanMode = "ltv", steps = [-15, -10, -5, 0, 5, 10]) {
+  return steps.map(pct => ({ pct, ...returnsAtPrice(d, d.purchasePrice * (1 + pct / 100), mode) }));
+}

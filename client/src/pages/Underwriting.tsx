@@ -2,8 +2,8 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { UnderwritingDeal, InsertUnderwriting } from "@shared/schema";
-import { buildProforma, calcReturns } from "@shared/underwriting";
+import type { UnderwritingDeal, InsertUnderwriting, PipelineDeal } from "@shared/schema";
+import { buildProforma, calcReturns, maxPriceForIrr, priceSensitivity, type LoanMode } from "@shared/underwriting";
 import { insertUnderwritingSchema } from "@shared/schema";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -308,6 +308,10 @@ export default function Underwriting() {
                 </div>
               )}
 
+              {returns && (calc.purchasePrice ?? 0) > 0 && (calc.grossPotentialRent ?? 0) > 0 && (
+                <MaxPriceCard model={calc as UnderwritingDeal} dealId={selected?.dealId ?? null} editing={editMode} />
+              )}
+
               {/* AI Document Upload Panel */}
               {editMode && (
                 <Card className="border-primary/30 bg-primary/5 dark:bg-primary/10">
@@ -607,5 +611,101 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
       <span className="text-muted-foreground text-xs">{label}</span>
       <span className="font-mono font-medium text-foreground text-xs">{value}</span>
     </div>
+  );
+}
+
+// ── Maximum price for a target IRR ──────────────────────────────────────────
+function MaxPriceCard({ model, dealId, editing }: { model: UnderwritingDeal; dealId: number | null; editing: boolean }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [target, setTarget] = useState("15");
+  const [mode, setMode] = useState<LoanMode>("ltv");
+  const t = parseFloat(target);
+  const maxPrice = useMemo(() => (isFinite(t) ? maxPriceForIrr(model, t, mode) : null), [model, t, mode]);
+  const rows = useMemo(() => priceSensitivity(model, mode), [model, mode]);
+  const ltv = model.purchasePrice > 0 ? (model.loanAmount / model.purchasePrice) * 100 : 0;
+  const { data: deal } = useQuery<PipelineDeal>({ queryKey: ["/api/pipeline", dealId ?? 0], enabled: !!dealId });
+
+  const setOffer = useMutation({
+    mutationFn: (price: number) => apiRequest("PATCH", `/api/pipeline/${dealId}`, { offerPrice: price }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
+      qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
+      toast({ title: "Offer updated", description: "The deal's offer and this model's purchase price now match." });
+    },
+    onError: (e: Error) => toast({ title: "Could not update offer", description: e.message, variant: "destructive" }),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-2 pt-3 px-4">
+        <CardTitle className="text-sm font-semibold">Maximum price</CardTitle>
+      </CardHeader>
+      <CardContent className="px-4 pb-4 space-y-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <Label htmlFor="target-irr" className="text-xs">Target levered IRR (%)</Label>
+            <Input id="target-irr" value={target} onChange={e => setTarget(e.target.value)} className="w-28 h-9" inputMode="decimal" />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Loan as price changes</Label>
+            <Select value={mode} onValueChange={v => setMode(v as LoanMode)}>
+              <SelectTrigger className="w-[220px] h-9"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ltv">Same LTV ({ltv.toFixed(0)}%)</SelectItem>
+                <SelectItem value="fixed">Same loan amount ({fmt$(model.loanAmount)})</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-xs text-muted-foreground">Most you can pay for {isFinite(t) ? `${t}%` : "—"}</div>
+            <div className="text-2xl font-bold font-mono text-foreground">{maxPrice ? `$${maxPrice.toLocaleString()}` : "Not reachable"}</div>
+            {maxPrice && model.purchasePrice > 0 && (
+              <div className="text-xs text-muted-foreground">
+                {maxPrice >= model.purchasePrice ? `${fmt$(maxPrice - model.purchasePrice)} above` : `${fmt$(model.purchasePrice - maxPrice)} below`} the current price
+              </div>
+            )}
+          </div>
+        </div>
+        {!maxPrice && isFinite(t) && (
+          <p className="text-xs text-muted-foreground">Even at a small fraction of the current price, the model's income, costs and exit assumptions don't reach {t}%.</p>
+        )}
+        {dealId && maxPrice && !editing && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="outline" disabled={setOffer.isPending} onClick={() => setOffer.mutate(maxPrice)}>
+              Set as our offer{deal ? ` on ${deal.dealCode}` : ""}
+            </Button>
+            <span className="text-xs text-muted-foreground">Updates the Pipeline deal; this model's purchase price follows it.</span>
+          </div>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-muted-foreground border-b border-border whitespace-nowrap">
+                <th className="text-left py-1.5 font-medium">Price</th>
+                <th className="text-right py-1.5 font-medium">vs. current</th>
+                <th className="text-right py-1.5 font-medium">IRR</th>
+                <th className="text-right py-1.5 font-medium">Equity multiple</th>
+                <th className="text-right py-1.5 font-medium">Yr 1 cash-on-cash</th>
+                <th className="text-right py-1.5 font-medium">Yr 1 DSCR</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {rows.map(r => (
+                <tr key={r.pct} className={r.pct === 0 ? "font-semibold" : ""}>
+                  <td className="py-1.5 font-mono">{fmt$(r.price)}</td>
+                  <td className="py-1.5 text-right text-muted-foreground">{r.pct === 0 ? "current" : `${r.pct > 0 ? "+" : ""}${r.pct}%`}</td>
+                  <td className={`py-1.5 text-right font-mono ${isFinite(t) && r.irr >= t ? "text-green-700 dark:text-green-400" : ""}`}>{fmtPct(r.irr, 1)}</td>
+                  <td className="py-1.5 text-right font-mono">{fmtX(r.equityMultiple)}</td>
+                  <td className="py-1.5 text-right font-mono">{fmtPct(r.yr1CoC, 1)}</td>
+                  <td className="py-1.5 text-right font-mono">{r.loanAmount > 0 ? `${r.yr1Dscr.toFixed(2)}x` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-xs text-muted-foreground">Equity is recalculated at each price as total cost minus the loan. Rents, expenses and exit cap rate stay as entered.</p>
+      </CardContent>
+    </Card>
   );
 }

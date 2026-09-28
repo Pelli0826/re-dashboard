@@ -136,7 +136,7 @@ export default function Overview() {
         <KpiCard icon={<Building2 size={18} />} label="Active Projects" value={String(activeProjects)} sub={`${projects.length} total`} color="text-primary" />
         <KpiCard icon={<DollarSign size={18} />} label="Total Budget" value={fmt(totalBudget)} sub={`${fmt(totalSpent)} spent (${pct(totalSpent, totalBudget)}%)`} color="text-chart-1" />
         <KpiCard icon={<TrendingUp size={18} />} label="Projected NOI" value={fmt(projectedNoi)} sub="at stabilization" color="text-green-600 dark:text-green-400" />
-        <KpiCard icon={<DollarSign size={18} />} label="Weighted Pipeline" value={fmt(pipelineValue)} sub={`${activeDeals.length} active deals`} color="text-orange-500" />
+        <KpiCard icon={<DollarSign size={18} />} label="Weighted Pipeline" value={fmt(pipelineValue)} sub={`${activeDeals.length} active deal${activeDeals.length === 1 ? "" : "s"}, value × probability`} color="text-orange-500" />
       </div>
 
       {/* Projects + ARM grid */}
@@ -245,6 +245,7 @@ export default function Overview() {
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-semibold text-foreground">Pipeline Snapshot</CardTitle>
+          <p className="text-xs text-muted-foreground">Weighted uses projected value, else our offer, else the asking price, times the close probability.</p>
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
@@ -254,8 +255,10 @@ export default function Overview() {
                   <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">Deal</th>
                   <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">Stage</th>
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">Ask</th>
+                  <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">Offer</th>
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium hidden md:table-cell">Proj. Value</th>
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">Probability</th>
+                  <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">Weighted</th>
                   <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium hidden lg:table-cell">Closing</th>
                 </tr>
               </thead>
@@ -272,11 +275,15 @@ export default function Overview() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-right font-mono">{fmt(d.askingPrice)}</td>
+                    <td className="px-4 py-2.5 text-right font-mono">{fmt(d.offerPrice)}</td>
                     <td className="px-4 py-2.5 text-right font-mono text-green-600 dark:text-green-400 hidden md:table-cell">{fmt(d.projectedValue)}</td>
                     <td className="px-4 py-2.5 text-right">
                       <span className={`font-mono font-semibold text-xs ${effectiveProbability(d) >= 70 ? "text-green-600 dark:text-green-400" : effectiveProbability(d) >= 40 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400"}`}>
                         {effectiveProbability(d)}%
                       </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-orange-600 dark:text-orange-400">
+                      {(d.projectedValue ?? d.offerPrice ?? d.askingPrice) ? fmt((d.projectedValue ?? d.offerPrice ?? d.askingPrice ?? 0) * effectiveProbability(d) / 100) : "—"}
                     </td>
                     <td className="px-4 py-2.5 text-right text-xs text-muted-foreground hidden lg:table-cell">{d.closingDate ?? "—"}</td>
                   </tr>
