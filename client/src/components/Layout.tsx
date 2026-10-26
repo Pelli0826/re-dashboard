@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { Task } from "@shared/schema";
 import {
   LayoutDashboard, FolderKanban, TrendingUp, BadgeDollarSign,
-  LineChart, Users, UserCheck, FileText, CheckSquare, Calculator,
+  LineChart, Users, UserCheck, FileText, CheckSquare,
   ChevronLeft, ChevronRight, Sun, Moon, Building2, LogOut, Download, AlertTriangle
 } from "lucide-react";
 import PerplexityAttribution from "./PerplexityAttribution";
@@ -19,7 +19,6 @@ const navItems = [
   { href: "/contacts", icon: Users, label: "Contacts" },
   { href: "/documents", icon: FileText, label: "Documents" },
   { href: "/tasks", icon: CheckSquare, label: "Tasks" },
-  { href: "/underwriting", icon: Calculator, label: "Underwriting" },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {

@@ -17,6 +17,8 @@ import {
 import type { Project } from "@shared/schema";
 import { PSA_STAGES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import { LoiDialog } from "@/components/LoiDialog";
+import { DealUnderwriting, UW_TYPE } from "@/components/ModelWorkspace";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -126,6 +128,9 @@ export default function Pipeline() {
       return id || null;
     } catch { return null; }
   });
+  const [detailTab, setDetailTab] = useState<DealTab>("overview");
+  // Open a deal on a given tab (new deals open on Underwriting: it's the first step).
+  const openDeal = (id: number | null, tab: DealTab = "overview") => { setDetailTab(tab); setDetailId(id); };
   const [deadTarget, setDeadTarget] = useState<PipelineDeal | null>(null);
   const [intake, setIntake] = useState<Intake | null>(null);
   const [reading, setReading] = useState<string | null>(null);
@@ -274,6 +279,8 @@ export default function Pipeline() {
         </DialogContent>
       </Dialog>
 
+      <UnlinkedModels deals={deals} onOpen={id => openDeal(id, "underwriting")} />
+
       {/* Needs attention */}
       {alerts.length > 0 && (
         <Card className="border-orange-300 dark:border-orange-800">
@@ -286,7 +293,7 @@ export default function Pipeline() {
             <ul className="divide-y divide-border">
               {alerts.slice(0, 8).map((a, i) => (
                 <li key={i}>
-                  <button onClick={() => setDetailId(a.deal.id)} className="w-full flex items-center gap-3 py-2 text-left hover:bg-muted/50 rounded px-1">
+                  <button onClick={() => openDeal(a.deal.id)} className="w-full flex items-center gap-3 py-2 text-left hover:bg-muted/50 rounded px-1">
                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${a.severity === "high" ? "bg-red-500" : "bg-amber-500"}`} aria-hidden />
                     <span className="text-sm font-medium text-foreground">{a.deal.name}</span>
                     <span className="text-sm text-muted-foreground">{a.text}</span>
@@ -354,7 +361,7 @@ export default function Pipeline() {
                     return (
                       <button
                         key={d.id}
-                        onClick={() => setDetailId(d.id)}
+                        onClick={() => openDeal(d.id)}
                         data-testid={`card-deal-${d.id}`}
                         className={`w-full text-left rounded-lg border border-border border-t-4 ${stageAccent[stage]} bg-card p-3 space-y-1.5 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
                       >
@@ -409,7 +416,7 @@ export default function Pipeline() {
                     const broker = d.brokerContactId ? contactMap[d.brokerContactId] : undefined;
                     const dl = nextDeadlineWithMilestones(d, milestones);
                     return (
-                      <tr key={d.id} className="hover:bg-muted/40 cursor-pointer" onClick={() => setDetailId(d.id)}>
+                      <tr key={d.id} className="hover:bg-muted/40 cursor-pointer" onClick={() => openDeal(d.id)}>
                         <td className="px-4 py-2.5 min-w-[220px]">
                           <div className="font-medium text-foreground leading-snug">{d.name}</div>
                           <div className="text-xs text-muted-foreground">{d.dealCode}, {DEAL_TYPE_LABELS[d.type] ?? d.type}{d.municipality ? `, ${d.municipality}` : ""}</div>
@@ -444,7 +451,7 @@ export default function Pipeline() {
             qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
             setFormDeal(null);
             setIntake(null);
-            if (isNew) setDetailId(saved.id);
+            if (isNew) openDeal(saved.id, "underwriting");
           }}
         />
       )}
@@ -457,6 +464,8 @@ export default function Pipeline() {
         onDelete={confirmDelete}
         onStage={requestStage}
         stagePending={moveStage.isPending}
+        tab={detailTab}
+        onTab={setDetailTab}
       />
 
       <DeadReasonDialog
@@ -502,44 +511,71 @@ function DeadReasonDialog({ deal, onClose, onConfirm }: { deal: PipelineDeal | n
 }
 
 // ── Linked underwriting ─────────────────────────────────────────────────────
-export const OPEN_UW_KEY = "openUnderwritingId";
-
-function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
+// Models made on the old Underwriting page without a deal. Underwriting lives in deals now,
+// so offer to attach each one to a deal (or delete it). Nothing changes until the user clicks.
+function UnlinkedModels({ deals, onOpen }: { deals: PipelineDeal[]; onOpen: (dealId: number) => void }) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [, navigate] = useLocation();
+  const confirm = useConfirm();
+  const { data: models = [] } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
+  const loose = models.filter(m => !m.dealId);
+  const [pick, setPick] = useState<Record<number, string>>({});
+  const link = useMutation({
+    mutationFn: ({ id, dealId }: { id: number; dealId: number }) => apiRequest("PATCH", `/api/underwriting/${id}`, { dealId }),
+    onSuccess: (_r, v) => { qc.invalidateQueries({ queryKey: ["/api/underwriting"] }); toast({ title: "Model attached to the deal" }); onOpen(v.dealId); },
+    onError: (e: Error) => toast({ title: "Could not attach", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
+  });
+  const remove = useMutation({
+    mutationFn: (id: number) => apiRequest("DELETE", `/api/underwriting/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/underwriting"] }),
+  });
+  if (!loose.length) return null;
+  const choices = [...deals].sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Calculator size={15} className="text-muted-foreground" /> {loose.length === 1 ? "1 underwriting model isn't" : `${loose.length} underwriting models aren't`} attached to a deal
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 space-y-2">
+        <p className="text-xs text-muted-foreground">Underwriting now lives in each deal. Attach these to a deal to keep working on them.</p>
+        <ul className="divide-y divide-border rounded-md border border-border">
+          {loose.map(m => (
+            <li key={m.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+              <span className="text-sm text-foreground flex-1 min-w-[160px] truncate">{m.name}</span>
+              <Select value={pick[m.id] ?? ""} onValueChange={v => setPick(p => ({ ...p, [m.id]: v }))}>
+                <SelectTrigger className="h-8 w-[220px] text-xs" aria-label={`Deal for ${m.name}`}><SelectValue placeholder="Choose a deal" /></SelectTrigger>
+                <SelectContent>{choices.map(d => <SelectItem key={d.id} value={String(d.id)}>{d.dealCode} {d.name}</SelectItem>)}</SelectContent>
+              </Select>
+              <Button size="sm" variant="outline" className="h-8" disabled={!pick[m.id] || link.isPending}
+                onClick={() => link.mutate({ id: m.id, dealId: Number(pick[m.id]) })}>Attach</Button>
+              <button aria-label={`Delete ${m.name}`} className="p-1 text-muted-foreground hover:text-destructive"
+                onClick={async () => { if (await confirm({ title: `Delete ${m.name}?`, description: "This underwriting model isn't attached to any deal.", confirmLabel: "Delete model" })) remove.mutate(m.id); }}>
+                <Trash2 size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+        {!deals.length && <p className="text-xs text-muted-foreground">Add the deal first (Add deal or Upload OM), then attach the model to it.</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Compact view on the Overview tab; the full model is on the deal's Underwriting tab.
+function UnderwritingSummary({ deal, onOpen }: { deal: PipelineDeal; onOpen: () => void }) {
   const { data: models = [] } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
   const linked = models.filter(m => m.dealId === deal.id);
-
-  const open = (id: number) => {
-    try { sessionStorage.setItem(OPEN_UW_KEY, String(id)); } catch { /* storage unavailable */ }
-    navigate("/underwriting");
-  };
-  const create = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/underwriting", {
-        name: `${deal.dealCode} ${deal.name}`,
-        dealId: deal.id,
-        dealType: UW_TYPE[deal.type] ?? "commercial",
-        address: [deal.address, deal.municipality].filter(Boolean).join(", "),
-        createdAt: new Date().toISOString(),
-        purchasePrice: deal.offerPrice ?? deal.askingPrice ?? 0,
-        notes: `Created from pipeline deal ${deal.dealCode}.`,
-      });
-      return (await res.json()) as UnderwritingDeal;
-    },
-    onSuccess: m => { qc.invalidateQueries({ queryKey: ["/api/underwriting"] }); open(m.id); },
-    onError: (e: Error) => toast({ title: "Could not create model", description: e.message, variant: "destructive" }),
-  });
 
   return (
     <section className="space-y-2">
       <h3 className="text-sm font-semibold text-foreground">Underwriting</h3>
       {linked.length === 0 ? (
         <div className="rounded-md border border-dashed border-border p-3 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm text-muted-foreground">No model yet. Its purchase price will follow this deal's offer.</p>
-          <Button size="sm" variant="outline" className="gap-1" onClick={() => create.mutate()} disabled={create.isPending}>
-            {create.isPending ? <Loader2 size={13} className="animate-spin" /> : <Calculator size={13} />} Create model
+          <p className="text-sm text-muted-foreground">Not underwritten yet.</p>
+          <Button size="sm" variant="outline" className="gap-1" onClick={onOpen}>
+            <Calculator size={13} /> Start underwriting
           </Button>
         </div>
       ) : linked.map(m => {
@@ -549,7 +585,7 @@ function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
           <div key={m.id} className="rounded-md border border-border p-3 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-sm font-medium text-foreground">{m.name}</span>
-              <Button size="sm" variant="ghost" className="gap-1 h-7" onClick={() => open(m.id)}><Calculator size={13} /> Open</Button>
+              <Button size="sm" variant="ghost" className="gap-1 h-7" onClick={onOpen}><Calculator size={13} /> Open</Button>
             </div>
             <dl className="grid grid-cols-3 gap-x-4 gap-y-2">
               <Fact label="Purchase price" value={m.purchasePrice ? fmtMoney(m.purchasePrice) : "Not set"} />
@@ -874,7 +910,7 @@ function AskDeal({ deal }: { deal: PipelineDeal }) {
         <p className="text-sm text-muted-foreground">Add ANTHROPIC_API_KEY in Railway to turn this on.</p>
       ) : (
         <>
-          <p className="text-xs text-muted-foreground">Claude answers from this deal's saved PDFs and Word files, notes, activity log, tasks, milestones and underwriting, and says where each answer comes from. It can also suggest changes for you to apply.</p>
+          <p className="text-xs text-muted-foreground">Claude answers from this deal's saved PDF, Excel and Word files, notes, activity log, tasks, milestones and underwriting, and says where each answer comes from. It can also suggest changes for you to apply.</p>
           {thread.map((t, i) => (
             <div key={i} className="space-y-1.5">
               <p className="text-sm font-medium text-foreground">{t.question}</p>
@@ -925,8 +961,10 @@ function Fact({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, stagePending }: {
-  deal: PipelineDeal | null; broker?: Contact; onClose: () => void;
+export type DealTab = "overview" | "underwriting" | "files" | "activity";
+
+function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, stagePending, tab, onTab }: {
+  deal: PipelineDeal | null; broker?: Contact; onClose: () => void; tab: DealTab; onTab: (t: DealTab) => void;
   onEdit: (d: PipelineDeal) => void; onDelete: (d: PipelineDeal) => void;
   onStage: (d: PipelineDeal, stage: string) => void; stagePending: boolean;
 }) {
@@ -967,7 +1005,7 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
 
   return (
     <Sheet open={!!deal} onOpenChange={o => { if (!o) onClose(); }}>
-      <SheetContent className="w-full sm:max-w-xl overflow-y-auto">
+      <SheetContent className="w-full sm:max-w-5xl overflow-y-auto">
         {deal && (
           <div className="space-y-6">
             <SheetHeader className="space-y-1 text-left">
@@ -996,155 +1034,175 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
             )}
             {dl && <DeadlineChip dl={dl} />}
 
-            <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-foreground">Pricing</h3>
-              <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-                <Fact label="Asking" value={deal.askingPrice ? fmtMoney(deal.askingPrice) : "Not set"} />
-                <Fact label="Our offer" value={deal.offerPrice ? fmtMoney(deal.offerPrice) : null} />
-                <Fact label="Projected value" value={deal.projectedValue ? fmtMoney(deal.projectedValue) : null} />
-                <Fact label="NOI" value={deal.noi ? fmtMoney(deal.noi) : null} />
-                <Fact label="Cap rate" value={deal.capRate ? `${deal.capRate}%` : null} />
-                <Fact label="Price per SF" value={deal.askingPrice && deal.sqft ? `$${Math.round(deal.askingPrice / deal.sqft)}` : null} />
-                <Fact label="Price per acre" value={deal.askingPrice && deal.acres ? fmtMoney(deal.askingPrice / deal.acres) : null} />
-                <Fact label="Price per unit" value={deal.askingPrice && deal.units ? fmtMoney(deal.askingPrice / deal.units) : null} />
-              </dl>
-              {deal.priceNotes && <p className="text-sm text-muted-foreground">{deal.priceNotes}</p>}
-            </section>
+            <Tabs value={tab} onValueChange={v => onTab(v as DealTab)} className="space-y-5">
+              <TabsList>
+                <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="underwriting">Underwriting</TabsTrigger>
+                <TabsTrigger value="files">Files</TabsTrigger>
+                <TabsTrigger value="activity">Activity</TabsTrigger>
+              </TabsList>
 
-            {[deal.acres, deal.sqft, deal.units, deal.yearBuilt, deal.occupancy, deal.county, deal.zoning, deal.floodZone, deal.groundLease || null, deal.utilities].some(v => v != null && v !== "") && <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-foreground">Property</h3>
-              <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-                <Fact label="Land" value={deal.acres ? `${deal.acres} acres` : null} />
-                <Fact label="Building" value={deal.sqft ? `${deal.sqft.toLocaleString()} SF` : null} />
-                <Fact label="Units" value={deal.units} />
-                <Fact label="Year built" value={deal.yearBuilt} />
-                <Fact label="Occupancy" value={deal.occupancy != null ? `${deal.occupancy}%` : null} />
-                <Fact label="County" value={deal.county} />
-                <Fact label="Zoning" value={deal.zoning} />
-                <Fact label="Flood" value={deal.floodZone} />
-                <Fact label="Ground lease" value={deal.groundLease ? "Yes" : null} />
-              </dl>
-              {deal.utilities && <p className="text-sm text-muted-foreground">Utilities: {deal.utilities}</p>}
-            </section>}
+              <TabsContent value="overview" className="space-y-6 mt-0">
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-foreground">Pricing</h3>
+                  <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+                    <Fact label="Asking" value={deal.askingPrice ? fmtMoney(deal.askingPrice) : "Not set"} />
+                    <Fact label="Our offer" value={deal.offerPrice ? fmtMoney(deal.offerPrice) : null} />
+                    <Fact label="Projected value" value={deal.projectedValue ? fmtMoney(deal.projectedValue) : null} />
+                    <Fact label="NOI" value={deal.noi ? fmtMoney(deal.noi) : null} />
+                    <Fact label="Cap rate" value={deal.capRate ? `${deal.capRate}%` : null} />
+                    <Fact label="Price per SF" value={deal.askingPrice && deal.sqft ? `$${Math.round(deal.askingPrice / deal.sqft)}` : null} />
+                    <Fact label="Price per acre" value={deal.askingPrice && deal.acres ? fmtMoney(deal.askingPrice / deal.acres) : null} />
+                    <Fact label="Price per unit" value={deal.askingPrice && deal.units ? fmtMoney(deal.askingPrice / deal.units) : null} />
+                  </dl>
+                  {deal.priceNotes && <p className="text-sm text-muted-foreground">{deal.priceNotes}</p>}
+                </section>
 
-            {scenarios.length > 0 && (
-              <section className="space-y-2">
-                <h3 className="text-sm font-semibold text-foreground">Development scenarios</h3>
-                <ul className="space-y-2">
-                  {scenarios.map((sc, i) => (
-                    <li key={i} className="rounded-md border border-border px-3 py-2">
-                      <div className="text-sm font-medium text-foreground">{sc.label || `Option ${i + 1}`}: {sc.use}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {[sc.buildingSf ? `${sc.buildingSf.toLocaleString()} SF` : null, sc.units ? `${sc.units} units` : null].filter(Boolean).join(", ")}
-                        {sc.notes ? `${sc.buildingSf || sc.units ? ". " : ""}${sc.notes}` : ""}
+                {[deal.acres, deal.sqft, deal.units, deal.yearBuilt, deal.occupancy, deal.county, deal.zoning, deal.floodZone, deal.groundLease || null, deal.utilities].some(v => v != null && v !== "") && <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-foreground">Property</h3>
+                  <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+                    <Fact label="Land" value={deal.acres ? `${deal.acres} acres` : null} />
+                    <Fact label="Building" value={deal.sqft ? `${deal.sqft.toLocaleString()} SF` : null} />
+                    <Fact label="Units" value={deal.units} />
+                    <Fact label="Year built" value={deal.yearBuilt} />
+                    <Fact label="Occupancy" value={deal.occupancy != null ? `${deal.occupancy}%` : null} />
+                    <Fact label="County" value={deal.county} />
+                    <Fact label="Zoning" value={deal.zoning} />
+                    <Fact label="Flood" value={deal.floodZone} />
+                    <Fact label="Ground lease" value={deal.groundLease ? "Yes" : null} />
+                  </dl>
+                  {deal.utilities && <p className="text-sm text-muted-foreground">Utilities: {deal.utilities}</p>}
+                </section>}
+
+                {scenarios.length > 0 && (
+                  <section className="space-y-2">
+                    <h3 className="text-sm font-semibold text-foreground">Development scenarios</h3>
+                    <ul className="space-y-2">
+                      {scenarios.map((sc, i) => (
+                        <li key={i} className="rounded-md border border-border px-3 py-2">
+                          <div className="text-sm font-medium text-foreground">{sc.label || `Option ${i + 1}`}: {sc.use}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {[sc.buildingSf ? `${sc.buildingSf.toLocaleString()} SF` : null, sc.units ? `${sc.units} units` : null].filter(Boolean).join(", ")}
+                            {sc.notes ? `${sc.buildingSf || sc.units ? ". " : ""}${sc.notes}` : ""}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-foreground">Deal context</h3>
+                  <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+                    <Fact label="Source" value={deal.source ? SOURCE_LABELS[deal.source] : null} />
+                    <Fact label="Temperature" value={<TempBadge t={deal.temperature} />} />
+                    <Fact label="Competition" value={deal.competition ? <span className="capitalize">{deal.competition}</span> : null} />
+                    <Fact label="Seller motivation" value={deal.sellerMotivation ? <span className="capitalize">{deal.sellerMotivation}</span> : null} />
+                    <Fact label="Seller" value={deal.sellerName} />
+                  </dl>
+                  {broker && (
+                    <div className="rounded-md border border-border px-3 py-2 text-sm">
+                      <div className="font-medium text-foreground">{broker.name}{broker.company ? `, ${broker.company}` : ""}</div>
+                      <div className="flex flex-wrap gap-x-4 text-muted-foreground">
+                        {broker.phone && <a className="inline-flex items-center gap-1 hover:text-foreground" href={`tel:${broker.phone}`}><Phone size={12} />{broker.phone}</a>}
+                        {broker.email && <a className="inline-flex items-center gap-1 hover:text-foreground" href={`mailto:${broker.email}`}><Mail size={12} />{broker.email}</a>}
                       </div>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
+                    </div>
+                  )}
+                  {deal.reasonForSale && <p className="text-sm text-muted-foreground">Reason for sale: {deal.reasonForSale}</p>}
+                </section>
 
-            <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-foreground">Deal context</h3>
-              <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-                <Fact label="Source" value={deal.source ? SOURCE_LABELS[deal.source] : null} />
-                <Fact label="Temperature" value={<TempBadge t={deal.temperature} />} />
-                <Fact label="Competition" value={deal.competition ? <span className="capitalize">{deal.competition}</span> : null} />
-                <Fact label="Seller motivation" value={deal.sellerMotivation ? <span className="capitalize">{deal.sellerMotivation}</span> : null} />
-                <Fact label="Seller" value={deal.sellerName} />
-              </dl>
-              {broker && (
-                <div className="rounded-md border border-border px-3 py-2 text-sm">
-                  <div className="font-medium text-foreground">{broker.name}{broker.company ? `, ${broker.company}` : ""}</div>
-                  <div className="flex flex-wrap gap-x-4 text-muted-foreground">
-                    {broker.phone && <a className="inline-flex items-center gap-1 hover:text-foreground" href={`tel:${broker.phone}`}><Phone size={12} />{broker.phone}</a>}
-                    {broker.email && <a className="inline-flex items-center gap-1 hover:text-foreground" href={`mailto:${broker.email}`}><Mail size={12} />{broker.email}</a>}
-                  </div>
-                </div>
-              )}
-              {deal.reasonForSale && <p className="text-sm text-muted-foreground">Reason for sale: {deal.reasonForSale}</p>}
-            </section>
+                {[deal.firstContactDate, deal.loiDate, deal.loiExpiration, deal.contractDate, deal.ddEndDate, deal.closingDate].some(Boolean) && <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-foreground">Key dates</h3>
+                  <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+                    <Fact label="First contact" value={deal.firstContactDate ? fmtDate(deal.firstContactDate) : null} />
+                    <Fact label="LOI sent" value={deal.loiDate ? fmtDate(deal.loiDate) : null} />
+                    <Fact label="LOI expires" value={deal.loiExpiration ? fmtDate(deal.loiExpiration) : null} />
+                    <Fact label="Contract signed" value={deal.contractDate ? fmtDate(deal.contractDate) : null} />
+                    <Fact label="DD ends" value={deal.ddEndDate ? fmtDate(deal.ddEndDate) : null} />
+                    <Fact label="Closing" value={deal.closingDate ? fmtDate(deal.closingDate) : null} />
+                  </dl>
+                </section>}
 
-            {[deal.firstContactDate, deal.loiDate, deal.loiExpiration, deal.contractDate, deal.ddEndDate, deal.closingDate].some(Boolean) && <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-foreground">Key dates</h3>
-              <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-                <Fact label="First contact" value={deal.firstContactDate ? fmtDate(deal.firstContactDate) : null} />
-                <Fact label="LOI sent" value={deal.loiDate ? fmtDate(deal.loiDate) : null} />
-                <Fact label="LOI expires" value={deal.loiExpiration ? fmtDate(deal.loiExpiration) : null} />
-                <Fact label="Contract signed" value={deal.contractDate ? fmtDate(deal.contractDate) : null} />
-                <Fact label="DD ends" value={deal.ddEndDate ? fmtDate(deal.ddEndDate) : null} />
-                <Fact label="Closing" value={deal.closingDate ? fmtDate(deal.closingDate) : null} />
-              </dl>
-            </section>}
+                <UnderwritingSummary deal={deal} onOpen={() => onTab("underwriting")} />
 
-            <UnderwritingSummary deal={deal} />
+                <DealProject deal={deal} />
 
-            <DealProject deal={deal} />
+                <DealMilestones deal={deal} />
 
-            <DealMilestones deal={deal} />
+                {(deal.keyRisks || deal.notes) && (
+                  <section className="space-y-2">
+                    {deal.keyRisks && <><h3 className="text-sm font-semibold text-foreground">Key risks</h3><p className="text-sm text-foreground whitespace-pre-line">{deal.keyRisks}</p></>}
+                    {deal.notes && <><h3 className="text-sm font-semibold text-foreground pt-2">Notes</h3><p className="text-sm text-foreground whitespace-pre-line">{deal.notes}</p></>}
+                  </section>
+                )}
 
-            <DealFiles deal={deal} />
+              </TabsContent>
 
-            <AskDeal key={deal.id} deal={deal} />
+              <TabsContent value="underwriting" className="mt-0">
+                <DealUnderwriting deal={deal} />
+              </TabsContent>
+
+              <TabsContent value="files" className="space-y-6 mt-0">
+                <DealFiles deal={deal} />
+
+                <AskDeal key={deal.id} deal={deal} />
+              </TabsContent>
+
+              <TabsContent value="activity" className="space-y-6 mt-0">
+                {dealTasks.length > 0 && (
+                  <section className="space-y-2">
+                    <h3 className="text-sm font-semibold text-foreground">Tasks ({dealTasks.filter(t => t.status === "done").length} of {dealTasks.length} done)</h3>
+                    <ul className="space-y-1">
+                      {dealTasks.map(t => (
+                        <li key={t.id}>
+                          <button onClick={() => toggleTask.mutate(t)} className="w-full flex items-start gap-2 text-left text-sm py-1 hover:bg-muted/50 rounded px-1">
+                            {t.status === "done" ? <CheckCircle2 size={15} className="text-green-600 mt-0.5 shrink-0" /> : <Circle size={15} className="text-muted-foreground mt-0.5 shrink-0" />}
+                            <span className={t.status === "done" ? "line-through text-muted-foreground" : "text-foreground"}>{t.title.replace(`${deal.name}: `, "")}</span>
+                            {t.dueDate && <span className="ml-auto text-xs text-muted-foreground whitespace-nowrap">{fmtDate(t.dueDate)}</span>}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+
+                <section className="space-y-3">
+                  <h3 className="text-sm font-semibold text-foreground">Activity</h3>
+                  <form
+                    className="space-y-2 rounded-md border border-border p-3"
+                    onSubmit={e => { e.preventDefault(); if (summary.trim()) log.mutate(); }}
+                  >
+                    <div className="flex gap-2">
+                      <Select value={kind} onValueChange={setKind}>
+                        <SelectTrigger className="w-[130px] h-9" aria-label="Activity type"><SelectValue /></SelectTrigger>
+                        <SelectContent>{ACTIVITY_KINDS.map(k => <SelectItem key={k} value={k}>{ACTIVITY_LABELS[k]}</SelectItem>)}</SelectContent>
+                      </Select>
+                      <Input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-[150px] h-9" aria-label="Date" />
+                    </div>
+                    <Textarea rows={2} value={summary} onChange={e => setSummary(e.target.value)} placeholder="What happened? e.g. Called Jon, seller open to a subject-to-approvals structure" aria-label="Summary" />
+                    <div className="flex justify-end">
+                      <Button size="sm" type="submit" disabled={!summary.trim() || log.isPending}>
+                        {log.isPending && <Loader2 size={13} className="animate-spin mr-1" />} Log activity
+                      </Button>
+                    </div>
+                  </form>
+                  <ol className="space-y-3">
+                    {activity.map(a => (
+                      <li key={a.id} className="flex gap-3">
+                        <div className="text-xs text-muted-foreground w-20 shrink-0 pt-0.5">{fmtDate(a.date)}</div>
+                        <div className="text-sm">
+                          <span className="font-medium text-foreground">{ACTIVITY_LABELS[a.kind] ?? a.kind}.</span>{" "}
+                          <span className="text-foreground whitespace-pre-line">{a.summary}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              </TabsContent>
+            </Tabs>
 
             <LoiDialog deal={deal} open={loiOpen} onClose={() => setLoiOpen(false)} />
-
-            {(deal.keyRisks || deal.notes) && (
-              <section className="space-y-2">
-                {deal.keyRisks && <><h3 className="text-sm font-semibold text-foreground">Key risks</h3><p className="text-sm text-foreground whitespace-pre-line">{deal.keyRisks}</p></>}
-                {deal.notes && <><h3 className="text-sm font-semibold text-foreground pt-2">Notes</h3><p className="text-sm text-foreground whitespace-pre-line">{deal.notes}</p></>}
-              </section>
-            )}
-
-            {dealTasks.length > 0 && (
-              <section className="space-y-2">
-                <h3 className="text-sm font-semibold text-foreground">Tasks ({dealTasks.filter(t => t.status === "done").length} of {dealTasks.length} done)</h3>
-                <ul className="space-y-1">
-                  {dealTasks.map(t => (
-                    <li key={t.id}>
-                      <button onClick={() => toggleTask.mutate(t)} className="w-full flex items-start gap-2 text-left text-sm py-1 hover:bg-muted/50 rounded px-1">
-                        {t.status === "done" ? <CheckCircle2 size={15} className="text-green-600 mt-0.5 shrink-0" /> : <Circle size={15} className="text-muted-foreground mt-0.5 shrink-0" />}
-                        <span className={t.status === "done" ? "line-through text-muted-foreground" : "text-foreground"}>{t.title.replace(`${deal.name}: `, "")}</span>
-                        {t.dueDate && <span className="ml-auto text-xs text-muted-foreground whitespace-nowrap">{fmtDate(t.dueDate)}</span>}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            <section className="space-y-3">
-              <h3 className="text-sm font-semibold text-foreground">Activity</h3>
-              <form
-                className="space-y-2 rounded-md border border-border p-3"
-                onSubmit={e => { e.preventDefault(); if (summary.trim()) log.mutate(); }}
-              >
-                <div className="flex gap-2">
-                  <Select value={kind} onValueChange={setKind}>
-                    <SelectTrigger className="w-[130px] h-9" aria-label="Activity type"><SelectValue /></SelectTrigger>
-                    <SelectContent>{ACTIVITY_KINDS.map(k => <SelectItem key={k} value={k}>{ACTIVITY_LABELS[k]}</SelectItem>)}</SelectContent>
-                  </Select>
-                  <Input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-[150px] h-9" aria-label="Date" />
-                </div>
-                <Textarea rows={2} value={summary} onChange={e => setSummary(e.target.value)} placeholder="What happened? e.g. Called Jon, seller open to a subject-to-approvals structure" aria-label="Summary" />
-                <div className="flex justify-end">
-                  <Button size="sm" type="submit" disabled={!summary.trim() || log.isPending}>
-                    {log.isPending && <Loader2 size={13} className="animate-spin mr-1" />} Log activity
-                  </Button>
-                </div>
-              </form>
-              <ol className="space-y-3">
-                {activity.map(a => (
-                  <li key={a.id} className="flex gap-3">
-                    <div className="text-xs text-muted-foreground w-20 shrink-0 pt-0.5">{fmtDate(a.date)}</div>
-                    <div className="text-sm">
-                      <span className="font-medium text-foreground">{ACTIVITY_LABELS[a.kind] ?? a.kind}.</span>{" "}
-                      <span className="text-foreground whitespace-pre-line">{a.summary}</span>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-            </section>
           </div>
         )}
       </SheetContent>
@@ -1179,7 +1237,6 @@ function fromIntake(a: OmAnalysis, brokerContactId: number | null): FormState {
   return f;
 }
 
-const UW_TYPE: Record<string, string> = { multifamily: "multifamily", land: "development" };
 
 function toForm(d: PipelineDeal | null): FormState {
   const f: FormState = {};

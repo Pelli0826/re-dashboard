@@ -1,4 +1,4 @@
-import { Switch, Route, Router } from "wouter";
+import { Switch, Route, Router, Redirect } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
@@ -14,7 +14,6 @@ import Contacts from "./pages/Contacts";
 import Investors from "./pages/Investors";
 import Documents from "./pages/Documents";
 import Tasks from "./pages/Tasks";
-import Underwriting from "./pages/Underwriting";
 import Login from "./pages/Login";
 import NotFound from "./pages/not-found";
 import { Loader2 } from "lucide-react";
@@ -50,7 +49,8 @@ function AppInner() {
           <Route path="/investors" component={Investors} />
           <Route path="/documents" component={Documents} />
           <Route path="/tasks" component={Tasks} />
-          <Route path="/underwriting" component={Underwriting} />
+          {/* Underwriting lives in each deal now (Pipeline → deal → Underwriting tab). */}
+          <Route path="/underwriting"><Redirect to="/pipeline" /></Route>
           <Route component={NotFound} />
         </Switch>
       </Layout>

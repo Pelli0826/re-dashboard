@@ -2,16 +2,13 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { UnderwritingDeal, InsertUnderwriting, PipelineDeal, DealFile } from "@shared/schema";
+import type { UnderwritingDeal, PipelineDeal, DealFile } from "@shared/schema";
 import { buildProforma, calcReturns, maxPriceForIrr, priceSensitivity, type LoanMode } from "@shared/underwriting";
 import { insertUnderwritingSchema } from "@shared/schema";
-import { useForm, Controller } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
-  Calculator, Plus, Trash2, Loader2, TrendingUp, DollarSign,
-  ChevronDown, ChevronUp, BarChart3, Building2, AlertTriangle, CheckCircle2,
-  Upload, FileText, Sparkles, X,
+  Calculator, Plus, Trash2, Loader2, BarChart3, CheckCircle2,
+  Upload, FileText, Sparkles,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,8 +16,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 
 // ─── Formatting ────────────────────────────────────────────────────────────
@@ -91,71 +86,37 @@ const DEFAULT_VALUES: FormValues = {
   exitCapRate: 5.5, sellingCosts: 2, preferredReturn: 8, notes: "",
 };
 
-// ─── Main component ────────────────────────────────────────────────────────
-export default function Underwriting() {
+// ─── One underwriting model, shown inside its deal's Underwriting tab ──────
+const fromModel = (m: UnderwritingDeal): FormValues => ({ ...DEFAULT_VALUES, ...m, notes: m.notes ?? "" });
+
+export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [selected, setSelected] = useState<UnderwritingDeal | null>(null);
-  const [newOpen, setNewOpen] = useState(false);
+  const selected = model;
   const [editMode, setEditMode] = useState(false);
-  const [extracting, setExtracting] = useState<string | null>(null); // docType being extracted
+  const [extracting, setExtracting] = useState<string | null>(null); // docType or file being read
   const [extractResults, setExtractResults] = useState<Record<string, any>[]>([]);
   const omRef = useRef<HTMLInputElement>(null);
   const rrRef = useRef<HTMLInputElement>(null);
   const plRef = useRef<HTMLInputElement>(null);
 
-  const { data: deals = [], isLoading } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
+  // Live calculator state: mirrors the saved model, plus unsaved edits while editing.
+  const [calc, setCalc] = useState<FormValues>(() => fromModel(model));
+  // Follow the saved model (e.g. "Set as our offer" changed its price) unless edits are in progress.
+  useEffect(() => { if (!editMode) setCalc(fromModel(model)); }, [model]);
 
-  // If the selected model was deleted (e.g. along with its Pipeline deal), clear it.
-  useEffect(() => {
-    if (selected && !deals.some(d => d.id === selected.id)) { setSelected(null); setEditMode(false); }
-  }, [deals]);
-
-  // Opened from a Pipeline deal: select that model once the list has loaded.
-  useEffect(() => {
-    let wanted: string | null = null;
-    try { wanted = sessionStorage.getItem("openUnderwritingId"); } catch { /* storage unavailable */ }
-    if (!wanted || deals.length === 0) return;
-    const d = deals.find(x => x.id === Number(wanted));
-    try { sessionStorage.removeItem("openUnderwritingId"); } catch { /* ignore */ }
-    if (d) selectDeal(d);
-  }, [deals]);
-
-  // Live calculator state (local, mirrors selected deal + edits)
-  const [calc, setCalc] = useState<FormValues>(DEFAULT_VALUES);
-
-  const proforma = useMemo(() => selected || editMode ? buildProforma(calc as any) : [], [calc, selected, editMode]);
+  const proforma = useMemo(() => buildProforma(calc as any), [calc]);
   const returns = useMemo(() => proforma.length > 0 ? calcReturns(calc as any, proforma) : null, [calc, proforma]);
 
-  function selectDeal(d: UnderwritingDeal) {
-    setSelected(d);
-    setEditMode(false);
-    setCalc({ ...DEFAULT_VALUES, ...d, notes: d.notes ?? "" });
-  }
-
-  // New deal form
-  const form = useForm<FormValues>({ resolver: zodResolver(formSchema), defaultValues: DEFAULT_VALUES });
-
-  const createDeal = useMutation({
-    mutationFn: (data: FormValues) => apiRequest("POST", "/api/underwriting", { ...data, createdAt: new Date().toISOString() }),
-    onSuccess: async (res) => {
-      const created = await res.json();
-      await qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
-      setNewOpen(false);
-      selectDeal(created);
-      toast({ title: "Deal created" });
-    },
-  });
-
   const saveDeal = useMutation({
-    mutationFn: (data: FormValues) => apiRequest("PATCH", `/api/underwriting/${selected!.id}`, data),
-    onSuccess: async (res) => {
-      const updated = await res.json();
-      await qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
-      setSelected(updated);
+    mutationFn: (data: FormValues) => apiRequest("PATCH", `/api/underwriting/${model.id}`, data),
+    onSuccess: async () => {
       setEditMode(false);
-      toast({ title: "Deal saved" });
+      setExtractResults([]);
+      await qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
+      toast({ title: "Underwriting saved" });
     },
+    onError: (e: Error) => toast({ title: "Could not save", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
   });
 
   const confirm = useConfirm();
@@ -163,10 +124,7 @@ export default function Underwriting() {
     mutationFn: (id: number) => apiRequest("DELETE", `/api/underwriting/${id}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
-      setSelected(null);
-      setEditMode(false);
-      setCalc(DEFAULT_VALUES);
-      toast({ title: "Deal deleted" });
+      toast({ title: "Model deleted" });
     },
   });
 
@@ -233,59 +191,8 @@ export default function Underwriting() {
     }
   }
 
-  if (isLoading) return <div className="flex items-center gap-2 text-muted-foreground h-32"><Loader2 className="animate-spin" size={16} /> Loading…</div>;
-
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-lg font-bold text-foreground">Deal Underwriting</h1>
-          <p className="text-sm text-muted-foreground">Evaluate and underwrite real estate acquisitions</p>
-        </div>
-        <Button onClick={() => { form.reset(DEFAULT_VALUES); setNewOpen(true); }} size="sm" className="gap-1.5" data-testid="button-new-deal">
-          <Plus size={14} /> New Deal
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
-        {/* Deal list sidebar */}
-        <div className="lg:col-span-1 space-y-2">
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Saved Deals ({deals.length})</p>
-          {deals.length === 0 && (
-            <div className="text-center py-8 text-sm text-muted-foreground border border-dashed rounded-lg">
-              <Calculator size={24} className="mx-auto mb-2 opacity-30" />
-              No deals yet.<br />Click New Deal to start.
-            </div>
-          )}
-          {deals.map(d => (
-            <div
-              key={d.id}
-              onClick={() => selectDeal(d)}
-              data-testid={`deal-card-${d.id}`}
-              className={`p-3 rounded-lg border cursor-pointer transition-colors ${selected?.id === d.id ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 hover:bg-muted/40"}`}
-            >
-              <div className="font-medium text-sm text-foreground truncate">{d.name}</div>
-              <div className="flex items-center gap-1.5 mt-1">
-                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium capitalize ${dealTypeColor[d.dealType] ?? ""}`}>{d.dealType}</span>
-              </div>
-              {d.address && <div className="text-[10px] text-muted-foreground mt-0.5 truncate">{d.address}</div>}
-            </div>
-          ))}
-        </div>
-
-        {/* Main panel */}
-        <div className="lg:col-span-3 space-y-4">
-          {!selected && !editMode ? (
-            <div className="flex flex-col items-center justify-center h-64 gap-3 text-center border border-dashed rounded-xl">
-              <BarChart3 size={40} className="text-muted-foreground opacity-30" />
-              <p className="text-sm text-muted-foreground">Select a deal from the list or create a new one to start underwriting.</p>
-              <Button size="sm" onClick={() => { form.reset(DEFAULT_VALUES); setNewOpen(true); }}>
-                <Plus size={14} className="mr-1" /> New Deal
-              </Button>
-            </div>
-          ) : (
-            <>
+            <div className="space-y-4">
               {/* Deal header */}
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div>
@@ -583,51 +490,72 @@ export default function Underwriting() {
                   </CardContent>
                 </Card>
               )}
-            </>
-          )}
-        </div>
-      </div>
+            </div>
+  );
+}
 
-      {/* New Deal Dialog */}
-      <Dialog open={newOpen} onOpenChange={setNewOpen}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>New Deal</DialogTitle>
-          </DialogHeader>
-          <form onSubmit={form.handleSubmit(d => createDeal.mutate(d))} className="space-y-3">
-            <div>
-              <Label className="text-xs text-muted-foreground mb-1 block">Deal Name</Label>
-              <Input {...form.register("name")} placeholder="e.g. Wicker Park Apartment" className="h-9" />
-              {form.formState.errors.name && <p className="text-xs text-red-500 mt-1">{form.formState.errors.name.message}</p>}
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground mb-1 block">Deal Type</Label>
-              <Controller control={form.control} name="dealType" render={({ field }) => (
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="multifamily">Multifamily</SelectItem>
-                    <SelectItem value="commercial">Commercial</SelectItem>
-                    <SelectItem value="development">Development</SelectItem>
-                    <SelectItem value="value-add">Value-Add</SelectItem>
-                  </SelectContent>
-                </Select>
-              )} />
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground mb-1 block">Address (optional)</Label>
-              <Input {...form.register("address")} placeholder="Property address" className="h-9" />
-            </div>
-            <div className="flex justify-end gap-2 pt-1">
-              <Button type="button" variant="outline" onClick={() => setNewOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={createDeal.isPending}>
-                {createDeal.isPending && <Loader2 className="animate-spin mr-1" size={13} />}
-                Create & Underwrite
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
+// ─── A deal's Underwriting tab: its model(s), or a button to start one ────
+export const UW_TYPE: Record<string, string> = { multifamily: "multifamily", land: "development" };
+
+export function DealUnderwriting({ deal }: { deal: PipelineDeal }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const { data: all = [], isLoading } = useQuery<UnderwritingDeal[]>({ queryKey: ["/api/underwriting"] });
+  const models = all.filter(m => m.dealId === deal.id).sort((a, b) => a.id - b.id);
+  const [chosen, setChosen] = useState<number | null>(null);
+  const model = models.find(m => m.id === chosen) ?? models[0];
+
+  const create = useMutation({
+    mutationFn: async (scenario: boolean) => {
+      const res = await apiRequest("POST", "/api/underwriting", {
+        name: scenario ? `${deal.dealCode} ${deal.name} (scenario ${models.length + 1})` : `${deal.dealCode} ${deal.name}`,
+        dealId: deal.id,
+        dealType: UW_TYPE[deal.type] ?? "commercial",
+        address: [deal.address, deal.municipality].filter(Boolean).join(", "),
+        createdAt: new Date().toISOString(),
+        purchasePrice: deal.offerPrice ?? deal.askingPrice ?? 0,
+        // A scenario starts as a copy of the current model's assumptions.
+        ...(scenario && model ? Object.fromEntries(Object.entries(model).filter(([k]) => !["id", "name", "dealId", "createdAt"].includes(k))) : {}),
+        notes: scenario ? `Scenario copied from "${model?.name}".` : `Created from pipeline deal ${deal.dealCode}.`,
+      });
+      return (await res.json()) as UnderwritingDeal;
+    },
+    onSuccess: m => { qc.invalidateQueries({ queryKey: ["/api/underwriting"] }); setChosen(m.id); },
+    onError: (e: Error) => toast({ title: "Could not create the model", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
+  });
+
+  if (isLoading) return <div className="flex items-center gap-2 text-muted-foreground py-8"><Loader2 className="animate-spin" size={16} /> Loading…</div>;
+
+  if (!model) return (
+    <div className="flex flex-col items-center justify-center gap-3 text-center border border-dashed rounded-xl py-12 px-6">
+      <Calculator size={36} className="text-muted-foreground opacity-40" />
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-foreground">Start underwriting this deal</p>
+        <p className="text-sm text-muted-foreground max-w-md">
+          Creates a model priced at {deal.offerPrice ? "your offer" : deal.askingPrice ? "the asking price" : "$0 until you set a price"}.
+          Then fill it in from the deal's files (OM, rent roll, operating statements) or type the numbers in.
+        </p>
+      </div>
+      <Button onClick={() => create.mutate(false)} disabled={create.isPending} className="gap-1.5">
+        {create.isPending ? <Loader2 size={14} className="animate-spin" /> : <Calculator size={14} />} Start underwriting
+      </Button>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {models.length > 1 && (
+          <Select value={String(model.id)} onValueChange={v => setChosen(Number(v))}>
+            <SelectTrigger className="h-8 w-auto min-w-[220px] text-sm" aria-label="Model"><SelectValue /></SelectTrigger>
+            <SelectContent>{models.map(m => <SelectItem key={m.id} value={String(m.id)}>{m.name}</SelectItem>)}</SelectContent>
+          </Select>
+        )}
+        <Button size="sm" variant="ghost" className="gap-1 h-8 ml-auto" onClick={() => create.mutate(true)} disabled={create.isPending}>
+          <Plus size={13} /> Add scenario
+        </Button>
+      </div>
+      <ModelWorkspace key={model.id} model={model} />
     </div>
   );
 }

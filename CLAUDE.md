@@ -29,8 +29,13 @@ GitHub, Resend or Anthropic's console as exact click paths.
 
 - React + Vite + Tailwind + shadcn/ui (client), Express (server), SQLite via better-sqlite3 +
   Drizzle ORM. TypeScript throughout. Node >= 20. Hash routing (wouter `useHashLocation`).
-- `client/src/pages/*.tsx`: one file per tab. `Pipeline.tsx` is the largest (deal board, deal
-  panel, OM intake, milestones, files, Ask about this deal, suggestion cards).
+- `client/src/pages/*.tsx`: one file per sidebar tab. `Pipeline.tsx` is the largest: deal board and the
+  deal workspace (a wide sheet with Overview, Underwriting, Files and Activity tabs), OM intake,
+  milestones, files, Ask about this deal, suggestion cards. There is no separate Underwriting page
+  (decided 2026-10-26): `/underwriting` redirects to the Pipeline; models are always worked on inside
+  their deal. New deals open on the Underwriting tab. Unattached models are listed on the Pipeline page.
+- `client/src/components/ModelWorkspace.tsx`: one underwriting model (inputs, Fill in from deal
+  files, returns, max price, proforma) and `DealUnderwriting` (a deal's models + Add scenario).
 - `client/src/components/ConfirmDialog.tsx`: `useConfirm()`; every delete must go through it.
 - `server/routes.ts`: all API routes, auth, deal update logic, proposals, file and ask endpoints.
 - `server/storage.ts`: DB location, `CREATE TABLE IF NOT EXISTS` schema, migrations, storage methods.
@@ -161,7 +166,10 @@ There is no test suite. What has worked:
   `claude-sonnet-5-5`; to try one, set `ANTHROPIC_MODEL` in Railway and test OM upload and Ask
   on a real deal before making it the default in `server/claude.ts`.
 - `extract.ts` keeps an OpenAI fallback path that is unused when `ANTHROPIC_API_KEY` is set.
-- Old-format Excel (.xls) can't be read anywhere; .xlsx, .docx, .csv and PDF can (`server/fileText.ts`).
+- Old-format Excel (.xls) can't be read anywhere; .xlsx/.xlsm, .docx, .csv and PDF can. Excel is read by
+  `server/fileText.ts` straight from the file's XML (JSZip), not by an Excel library: ExcelJS's full load
+  used ~3 GB on large models and its streaming reader skipped sheets at random. Verified cell by cell
+  against ExcelJS on ~70 of the owner's real workbooks (0 missing or changed values).
 - The footer "Created with Perplexity Computer" comes from `PerplexityAttribution.tsx` (the app
   was originally generated there). Leave it unless the owner asks.
 
