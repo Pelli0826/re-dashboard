@@ -8,7 +8,9 @@ import { extractFromPdf, type DocType } from "./extract";
 import { buildDigest, sendDigest, digestStatus, clearDigestError } from "./digest";
 import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES, askAboutDeal, type AskTurn } from "./claude";
 import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting";
-import { storage, DB_IS_PERSISTENT, getState, setState } from "./storage";
+import { storage, DB_IS_PERSISTENT, getState, setState, deleteState } from "./storage";
+import { buildLoiDocx } from "./loi";
+import { defaultLoiTerms, type LoiTerms } from "@shared/loi";
 import {
   STAGES, DEAL_TYPES, ACTIVITY_KINDS, STAGE_LABELS, daysSince, type Stage,
   isYmd, addDaysYmd, addMonthsYmd, diffDaysYmd,
@@ -566,6 +568,71 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.send(data);
   });
   app.delete("/api/files/:id", (req, res) => { storage.deleteDealFile(Number(req.params.id)); res.status(204).send(); });
+
+  // ── Letter of intent: terms are kept per deal in app_state; drafts are saved as deal files ──
+  const loiInput = z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date for the letter."),
+    recipientName: z.string().max(200), recipientCompany: z.string().max(200), recipientEmail: z.string().max(200),
+    property: z.string().trim().min(1, "Describe the property.").max(1000),
+    seller: z.string().trim().min(1, "Enter the seller.").max(300),
+    buyer: z.string().trim().min(1, "Enter the buyer.").max(300),
+    price: z.number().positive("Enter a purchase price."),
+    paymentTerms: z.string().max(500),
+    expirationDays: z.number().int().min(1).max(90),
+    deposits: z.array(z.object({ amount: z.number().positive("Each deposit needs an amount."), when: z.string().trim().min(1, "Say when each deposit is due.").max(600) })).max(6),
+    investigationDays: z.number().int().min(1).max(730),
+    approvals: z.string().max(4000),
+    closingDays: z.number().int().min(0).max(730),
+    closingAfter: z.string().trim().min(1).max(300),
+    prorations: z.boolean(),
+    brokerage: z.string().max(2000),
+    exclusivityMonths: z.number().int().min(0).max(24),
+    signerName: z.string().trim().min(1).max(200), signerTitle: z.string().max(200), signerPhone: z.string().max(50),
+  });
+  const loiKey = (id: number) => `loi:${id}`;
+  function loiDefaults(deal: PipelineDeal): LoiTerms {
+    const broker = deal.brokerContactId ? storage.getContacts().find(c => c.id === deal.brokerContactId) : null;
+    const uw = storage.getUnderwritingDeals().find(u => u.dealId === deal.id);
+    return defaultLoiTerms(deal, broker, uw?.purchasePrice);
+  }
+
+  app.get("/api/pipeline/:id/loi", (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    const saved = getState(loiKey(deal.id));
+    res.json({ terms: saved ? { ...loiDefaults(deal), ...JSON.parse(saved) } : loiDefaults(deal), saved: !!saved });
+  });
+  app.put("/api/pipeline/:id/loi", (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    const parsed = loiInput.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: readable(parsed.error) });
+    setState(loiKey(deal.id), JSON.stringify(parsed.data));
+    res.json({ terms: parsed.data, saved: true });
+  });
+  app.delete("/api/pipeline/:id/loi", (req, res) => {
+    deleteState(loiKey(Number(req.params.id)));
+    res.status(204).send();
+  });
+  // Saves the terms, writes the Word draft to the deal's files and logs it. The user edits and sends it.
+  app.post("/api/pipeline/:id/loi/draft", async (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    const parsed = loiInput.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: readable(parsed.error) });
+    const t = parsed.data;
+    setState(loiKey(deal.id), JSON.stringify(t));
+    let buffer: Buffer;
+    try { buffer = await buildLoiDocx(t); } catch (e: any) {
+      console.error(`[loi] build failed: ${e?.message}`);
+      return res.status(500).json({ message: `Could not create the Word file: ${e?.message ?? "unknown error"}` });
+    }
+    const safeName = deal.name.replace(/[\\/:*?"<>|]+/g, " ").trim();
+    const f = storage.saveDealFile(buffer, `LOI draft - ${safeName} - ${t.date}.docx`, ALLOWED_TYPES[".docx"], deal.id, "loi");
+    storage.addDealActivity(deal.id, todayYmd(), "note",
+      `LOI draft created: $${Math.round(t.price).toLocaleString("en-US")}, ${t.investigationDays}-day investigation, settlement ${t.closingDays} days after ${t.closingAfter}. Saved to Files as ${f.name}.`);
+    res.status(201).json(f);
+  });
 
   storage.cleanupPendingFiles();
   setInterval(() => storage.cleanupPendingFiles(), 6 * 3_600_000);

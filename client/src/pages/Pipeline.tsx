@@ -12,8 +12,9 @@ import {
   type Stage, type DevelopmentScenario, type Deadline, milestoneAlerts, nextDeadlineWithMilestones, daysUntil,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check, FileText,
 } from "lucide-react";
+import { LoiDialog } from "@/components/LoiDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -759,6 +760,7 @@ function DealFiles({ deal }: { deal: PipelineDeal }) {
               <li key={f.id} className="flex items-center gap-2 px-3 py-2 text-sm">
                 <a href={`/api/files/${f.id}/download${f.mime === "application/pdf" ? "?inline=1" : ""}`} target="_blank" rel="noopener" className="text-foreground hover:underline truncate">{f.name}</a>
                 {f.kind === "om" && <span className="text-[11px] px-1.5 rounded bg-muted text-muted-foreground">OM</span>}
+                {f.kind === "loi" && <span className="text-[11px] px-1.5 rounded bg-muted text-muted-foreground">LOI</span>}
                 <span className="ml-auto text-xs text-muted-foreground whitespace-nowrap">{fmtSize(f.size)}</span>
                 <a href={`/api/files/${f.id}/download`} aria-label={`Download ${f.name}`} className="p-1 text-muted-foreground hover:text-foreground"><Download size={13} /></a>
                 <button aria-label={`Delete ${f.name}`} className="p-1 text-muted-foreground hover:text-destructive"
@@ -879,6 +881,7 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
   const [kind, setKind] = useState<string>("call");
   const [date, setDate] = useState(today());
   const [summary, setSummary] = useState("");
+  const [loiOpen, setLoiOpen] = useState(false);
 
   const { data: activity = [] } = useQuery<DealActivity[]>({
     queryKey: ["/api/pipeline", deal?.id ?? 0, "activity"],
@@ -928,6 +931,7 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
               </Select>
               <span className="text-xs text-muted-foreground">{daysSince(deal.stageChangedAt)} days in stage, {effectiveProbability(deal)}% probability</span>
               <div className="ml-auto flex gap-1">
+                <Button size="sm" variant="outline" className="gap-1" onClick={() => setLoiOpen(true)}><FileText size={13} /> Draft LOI</Button>
                 <Button size="sm" variant="outline" className="gap-1" onClick={() => onEdit(deal)}><Pencil size={13} /> Edit</Button>
                 <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" onClick={() => onDelete(deal)} aria-label="Delete deal"><Trash2 size={14} /></Button>
               </div>
@@ -1026,6 +1030,8 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
             <DealFiles deal={deal} />
 
             <AskDeal key={deal.id} deal={deal} />
+
+            <LoiDialog deal={deal} open={loiOpen} onClose={() => setLoiOpen(false)} />
 
             {(deal.keyRisks || deal.notes) && (
               <section className="space-y-2">

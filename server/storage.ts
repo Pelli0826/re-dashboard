@@ -163,6 +163,9 @@ export function getState(key: string): string | null {
 export function setState(key: string, value: string): void {
   sqlite.prepare("INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
+export function deleteState(key: string): void {
+  sqlite.prepare("DELETE FROM app_state WHERE key = ?").run(key);
+}
 
 // ── Lightweight migrations for databases created by older versions ───────
 function addColumnIfMissing(table: string, column: string, ddl: string) {
@@ -290,6 +293,7 @@ export class DatabaseStorage implements IStorage {
       db.delete(tasks).where(eq(tasks.dealId, id)).run();
       db.delete(underwriting).where(eq(underwriting.dealId, id)).run();
       db.delete(pipeline).where(eq(pipeline.id, id)).run();
+      deleteState(`loi:${id}`);
     })();
     for (const f of files) removeStoredFile(f.storedName);
   }

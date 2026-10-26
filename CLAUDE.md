@@ -41,6 +41,11 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `shared/pipeline.ts`: stages, labels, alert rules, date helpers. Used by client AND server so
   the Pipeline page and the morning email always agree. Change rules here, not in two places.
 - `shared/underwriting.ts`: proforma, returns, IRR, max-price solver. Used by client and server.
+- `shared/loi.ts`: LOI terms, defaults from a deal, section wording, numbers in words (code, not
+  the model). `server/loi.ts` renders it to Word with the `docx` package;
+  `client/src/components/LoiDialog.tsx` is the form ("Draft LOI" in the deal panel). Terms are
+  kept in `app_state` as `loi:<dealId>`; drafts are saved as deal files with kind `loi`.
+  The wording is modeled on the firm's own LOIs; change clauses in `loiSections()`.
 - `shared/schema.ts`: Drizzle table definitions and types.
 
 ## Commands
@@ -119,6 +124,8 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 - Show real error reasons to the user (Anthropic, Resend), not generic messages.
 - Never log response bodies or deal data (the request logger logs method, path, status, time only).
 - Writing in the UI: plain language, sentence case, no jargon. Keep the existing visual style.
+- **Lifecycle: deal → project → property.** A deal becomes a project when the PSA is signed
+  (decided 2026-10-26), not at closing. Owned, operating assets will become properties (not built yet).
 
 ## Testing
 
@@ -155,5 +162,7 @@ There is no test suite. What has worked:
 
 - Forward an email to a `deals@` address to create a deal from the attached OM.
 - Broker follow-up email drafts (draft only; send needs approval).
-- LOI draft on moving to LOI; closing checklist on moving to Closing.
+- Closing checklist on moving to Closing.
+- Deal → project link at PSA signing (entering Due Diligence), then budget vs. actual and draws.
+- Properties tab for owned assets (rent roll, leases, monthly reporting-package upload).
 - Separate logins per partner so the activity log shows who did what.
