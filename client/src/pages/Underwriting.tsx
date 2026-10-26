@@ -348,7 +348,7 @@ export default function Underwriting() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="px-4 pb-4">
-                    <p className="text-xs text-muted-foreground mb-3">Upload any combination of documents — AI will extract the numbers and fill the fields below automatically.</p>
+                    <p className="text-xs text-muted-foreground mb-3">Upload any combination of documents (PDF, Excel, Word or CSV). Claude reads them and fills in the fields below for you to check.</p>
                     <div className="grid grid-cols-3 gap-3">
                       {([
                         { key: "om", label: "Offering Memo", ref: omRef },
@@ -359,7 +359,7 @@ export default function Underwriting() {
                           <input
                             ref={ref}
                             type="file"
-                            accept=".pdf"
+                            accept=".pdf,.xlsx,.xlsm,.docx,.csv"
                             className="hidden"
                             onChange={e => {
                               const f = e.target.files?.[0];
@@ -633,7 +633,7 @@ export default function Underwriting() {
 }
 
 // ── Files saved to the linked Pipeline deal ─────────────────────────────────
-const READABLE = /\.(pdf|xlsx|docx|csv)$/i;
+const READABLE = /\.(pdf|xlsx|xlsm|docx|csv)$/i;
 function guessDocType(f: DealFile): string {
   if (f.kind === "om" || /\b(om|offering|memorandum|brochure|package)\b/i.test(f.name)) return "om";
   if (/rent\s*roll|\brr\b/i.test(f.name)) return "rentroll";

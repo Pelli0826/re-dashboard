@@ -515,8 +515,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!["om", "rentroll", "pl"].includes(docType)) {
         return res.status(400).json({ message: "docType must be om, rentroll, or pl" });
       }
-      const result = await extractFromPdf(req.file.buffer, docType);
-      res.json(result);
+      const name = req.file.originalname ?? "";
+      if (/\.pdf$/i.test(name) || req.file.mimetype === "application/pdf") return res.json(await extractFromPdf(req.file.buffer, docType));
+      if (/\.xls$/i.test(name)) return res.status(400).json({ message: "Older .xls files can't be read. Open it in Excel, choose File → Save As → Excel Workbook (.xlsx), and upload that." });
+      const text = TEXT_READABLE.test(name) ? await fileToText(name, req.file.buffer) : null;
+      if (text == null) return res.status(400).json({ message: "Upload a PDF, Excel (.xlsx or .xlsm), Word (.docx) or CSV file." });
+      if (!text) return res.status(400).json({ message: `${name} looks empty.` });
+      res.json(await extractFromText(name, text, docType));
     } catch (err: any) {
       res.status(500).json({ message: err.message ?? "Extraction failed" });
     }
@@ -539,7 +544,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!TEXT_READABLE.test(f.name)) {
         return res.status(400).json({ message: /\.xls$/i.test(f.name)
           ? "Older .xls files can't be read. Open it in Excel, choose File → Save As → Excel Workbook (.xlsx), and add that to the deal."
-          : "Only PDF, Excel (.xlsx), Word (.docx) and CSV files can be read." });
+          : "Only PDF, Excel (.xlsx or .xlsm), Word (.docx) and CSV files can be read." });
       }
       const text = await fileToText(f.name, buffer);
       if (!text) return res.status(400).json({ message: `${f.name} looks empty.` });
@@ -590,6 +595,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Deal files ─────────────────────────────────────────────────────
   const ALLOWED_TYPES: Record<string, string> = {
     ".pdf": "application/pdf", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
     ".xls": "application/vnd.ms-excel", ".csv": "text/csv",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",

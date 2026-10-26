@@ -801,7 +801,7 @@ function DealFiles({ deal }: { deal: PipelineDeal }) {
     <section className="space-y-2">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-foreground">Files</h3>
-        <input ref={input} type="file" className="hidden" accept=".pdf,.xlsx,.xls,.csv,.docx,.png,.jpg,.jpeg" onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); }} />
+        <input ref={input} type="file" className="hidden" accept=".pdf,.xlsx,.xlsm,.xls,.csv,.docx,.png,.jpg,.jpeg" onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); }} />
         <Button size="sm" variant="ghost" className="gap-1 h-7" disabled={uploading} onClick={() => input.current?.click()}>
           {uploading ? <Loader2 size={13} className="animate-spin" /> : <Paperclip size={13} />} Add file
         </Button>
