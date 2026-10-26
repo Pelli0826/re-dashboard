@@ -1,0 +1,296 @@
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+
+// ─── Projects ──────────────────────────────────────────────────────────────
+export const projects = sqliteTable("projects", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  address: text("address").notNull(),
+  type: text("type").notNull(),
+  status: text("status").notNull(),
+  totalBudget: real("total_budget").notNull(),
+  spentToDate: real("spent_to_date").notNull().default(0),
+  projectedNoi: real("projected_noi"),
+  units: integer("units"),
+  sqft: integer("sqft"),
+  startDate: text("start_date").notNull(),
+  expectedCompletion: text("expected_completion"),
+  equity: real("equity"),
+  notes: text("notes"),
+});
+
+export const insertProjectSchema = createInsertSchema(projects).omit({ id: true });
+export type InsertProject = z.infer<typeof insertProjectSchema>;
+export type Project = typeof projects.$inferSelect;
+
+// ─── Pipeline Deals ────────────────────────────────────────────────────────
+// Stored in the "deals" table. Vocabulary (stages, types, etc.) lives in shared/pipeline.ts.
+export const pipeline = sqliteTable("deals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealCode: text("deal_code").notNull(),            // e.g. D-2026-001, assigned by server
+  name: text("name").notNull(),
+  address: text("address").notNull().default(""),
+  municipality: text("municipality"),
+  county: text("county"),
+  state: text("state"),
+  type: text("type").notNull(),
+  stage: text("stage").notNull(),
+  deadReason: text("dead_reason"),
+
+  // Source & context
+  source: text("source"),
+  brokerContactId: integer("broker_contact_id"),
+  sellerName: text("seller_name"),
+  temperature: text("temperature").notNull().default("warm"),
+  competition: text("competition"),
+  sellerMotivation: text("seller_motivation"),
+  reasonForSale: text("reason_for_sale"),
+
+  // Pricing & financials
+  askingPrice: real("asking_price"),
+  priceNotes: text("price_notes"),                   // e.g. "Priced by use and density"
+  offerPrice: real("offer_price"),
+  noi: real("noi"),
+  capRate: real("cap_rate"),
+  projectedValue: real("projected_value"),
+  probabilityOverride: integer("probability_override"),
+
+  // Property
+  units: integer("units"),
+  sqft: integer("sqft"),
+  acres: real("acres"),
+  yearBuilt: integer("year_built"),
+  occupancy: real("occupancy"),
+  zoning: text("zoning"),
+  floodZone: text("flood_zone"),
+  utilities: text("utilities"),
+  groundLease: integer("ground_lease").notNull().default(0),
+  keyRisks: text("key_risks"),
+  scenarios: text("scenarios"),                       // JSON array of DevelopmentScenario
+
+  // Dates (YYYY-MM-DD)
+  firstContactDate: text("first_contact_date"),
+  loiDate: text("loi_date"),
+  loiExpiration: text("loi_expiration"),
+  contractDate: text("contract_date"),
+  ddEndDate: text("dd_end_date"),
+  closingDate: text("closing_date"),
+
+  // System timestamps (ISO)
+  stageChangedAt: text("stage_changed_at").notNull(),
+  lastActivityAt: text("last_activity_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  notes: text("notes"),
+});
+
+export const insertPipelineSchema = createInsertSchema(pipeline).omit({
+  id: true, dealCode: true, stageChangedAt: true, lastActivityAt: true, createdAt: true, updatedAt: true,
+});
+export type InsertPipeline = z.infer<typeof insertPipelineSchema>;
+export type PipelineDeal = typeof pipeline.$inferSelect;
+
+// ─── Deal Files (OMs, rent rolls, etc. stored on the volume) ───────────────
+export const dealFiles = sqliteTable("deal_files", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealId: integer("deal_id"),                        // null while an OM upload is awaiting review
+  name: text("name").notNull(),                      // original file name
+  storedName: text("stored_name").notNull(),         // random name on disk
+  mime: text("mime").notNull(),
+  size: integer("size").notNull(),
+  kind: text("kind").notNull().default("other"),     // om | other
+  createdAt: text("created_at").notNull(),
+});
+export type DealFile = typeof dealFiles.$inferSelect;
+
+// ─── Deal Milestones (e.g. rezoning petition, final approvals) ────────────
+export const dealMilestones = sqliteTable("deal_milestones", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealId: integer("deal_id").notNull(),
+  name: text("name").notNull(),
+  dueDate: text("due_date"),                         // YYYY-MM-DD; null = date not known yet
+  status: text("status").notNull().default("open"),  // open | done
+  notes: text("notes"),                              // e.g. "PSA §4.1: within 120 days after Inspection Period"
+  completedAt: text("completed_at"),
+  createdAt: text("created_at").notNull(),
+});
+export type DealMilestone = typeof dealMilestones.$inferSelect;
+
+// ─── Deal Activity Log ─────────────────────────────────────────────────────
+export const dealActivity = sqliteTable("deal_activity", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealId: integer("deal_id").notNull(),
+  date: text("date").notNull(),                      // YYYY-MM-DD the touchpoint happened
+  kind: text("kind").notNull(),                      // call | email | meeting | site-visit | note | stage-change | created
+  summary: text("summary").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertDealActivitySchema = createInsertSchema(dealActivity).omit({ id: true, dealId: true, createdAt: true });
+export type InsertDealActivity = z.infer<typeof insertDealActivitySchema>;
+export type DealActivity = typeof dealActivity.$inferSelect;
+
+// ─── ARM Loans ─────────────────────────────────────────────────────────────
+export const armLoans = sqliteTable("arm_loans", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  loanName: text("loan_name").notNull(),
+  projectId: integer("project_id"),
+  lender: text("lender").notNull(),
+  originalBalance: real("original_balance").notNull(),
+  currentBalance: real("current_balance").notNull(),
+  currentRate: real("current_rate").notNull(),
+  indexType: text("index_type").notNull(),
+  margin: real("margin").notNull().default(0),
+  currentIndex: real("current_index").notNull().default(0),
+  cap: real("cap"),
+  floor: real("floor"),
+  nextResetDate: text("next_reset_date"),
+  maturityDate: text("maturity_date").notNull(),
+  monthlyPayment: real("monthly_payment"),
+  loanType: text("loan_type").notNull(),
+  status: text("status").notNull().default("active"),
+  notes: text("notes"),
+});
+
+export const insertArmLoanSchema = createInsertSchema(armLoans).omit({ id: true });
+export type InsertArmLoan = z.infer<typeof insertArmLoanSchema>;
+export type ArmLoan = typeof armLoans.$inferSelect;
+
+// ─── Cash Flow Entries ─────────────────────────────────────────────────────
+export const cashFlow = sqliteTable("cash_flow", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id").notNull(),
+  month: text("month").notNull(),          // YYYY-MM
+  category: text("category").notNull(),    // income | expense
+  subcategory: text("subcategory").notNull(), // rent, loan-proceeds, construction-cost, interest, mgmt-fee, etc.
+  amount: real("amount").notNull(),
+  notes: text("notes"),
+});
+
+export const insertCashFlowSchema = createInsertSchema(cashFlow).omit({ id: true });
+export type InsertCashFlow = z.infer<typeof insertCashFlowSchema>;
+export type CashFlowEntry = typeof cashFlow.$inferSelect;
+
+// ─── Contacts ─────────────────────────────────────────────────────────────
+export const contacts = sqliteTable("contacts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  company: text("company"),
+  role: text("role").notNull(),            // lender, broker, attorney, investor, contractor, architect, other
+  email: text("email"),
+  phone: text("phone"),
+  projectIds: text("project_ids"),        // JSON array of project IDs
+  notes: text("notes"),
+});
+
+export const insertContactSchema = createInsertSchema(contacts).omit({ id: true });
+export type InsertContact = z.infer<typeof insertContactSchema>;
+export type Contact = typeof contacts.$inferSelect;
+
+// ─── Equity Investors ──────────────────────────────────────────────────────
+export const investors = sqliteTable("investors", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  entityName: text("entity_name"),
+  contactId: integer("contact_id"),        // optional link to contacts
+  projectId: integer("project_id").notNull(),
+  commitment: real("commitment").notNull(), // total capital committed $
+  funded: real("funded").notNull().default(0), // amount actually wired
+  preferredReturn: real("preferred_return").notNull().default(8), // pref % per year
+  equityShare: real("equity_share").notNull(), // % ownership
+  totalDistributed: real("total_distributed").notNull().default(0),
+  status: text("status").notNull().default("active"), // active, exited, pending
+  closeDate: text("close_date"),
+  notes: text("notes"),
+});
+
+export const insertInvestorSchema = createInsertSchema(investors).omit({ id: true });
+export type InsertInvestor = z.infer<typeof insertInvestorSchema>;
+export type Investor = typeof investors.$inferSelect;
+
+// ─── Documents ────────────────────────────────────────────────────────────
+export const documents = sqliteTable("documents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id"),       // null = general
+  name: text("name").notNull(),
+  category: text("category").notNull(),   // permits, contracts, financials, legal, closing, other
+  url: text("url"),                        // external link (Google Drive, Dropbox, etc.)
+  notes: text("notes"),
+  uploadedAt: text("uploaded_at").notNull(), // ISO date string
+});
+
+export const insertDocumentSchema = createInsertSchema(documents).omit({ id: true });
+export type InsertDocument = z.infer<typeof insertDocumentSchema>;
+export type Document = typeof documents.$inferSelect;
+
+// ─── Tasks ────────────────────────────────────────────────────────────────
+export const tasks = sqliteTable("tasks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  description: text("description"),
+  projectId: integer("project_id"),          // optional link to a project
+  dealId: integer("deal_id"),                // optional link to a pipeline deal
+  priority: text("priority").notNull().default("medium"), // low | medium | high | urgent
+  status: text("status").notNull().default("open"),       // open | in-progress | done
+  dueDate: text("due_date"),                 // YYYY-MM-DD
+  reminderDate: text("reminder_date"),       // YYYY-MM-DD — show alert on/after this date
+  assignedTo: text("assigned_to"),           // free-text name
+  category: text("category"),               // permit | closing | finance | legal | construction | general
+  completedAt: text("completed_at"),         // ISO timestamp when marked done
+  createdAt: text("created_at").notNull(),   // ISO timestamp
+  notes: text("notes"),
+});
+
+export const insertTaskSchema = createInsertSchema(tasks).omit({ id: true });
+export type InsertTask = z.infer<typeof insertTaskSchema>;
+export type Task = typeof tasks.$inferSelect;
+
+// ─── Underwriting ─────────────────────────────────────────────────────────
+export const underwriting = sqliteTable("underwriting", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),                    // deal name
+  dealType: text("deal_type").notNull(),            // multifamily | commercial | development | value-add
+  dealId: integer("deal_id"),                        // linked pipeline deal; its offer sets purchasePrice
+  address: text("address"),
+  createdAt: text("created_at").notNull(),
+
+  // ── Acquisition
+  purchasePrice: real("purchase_price").notNull().default(0),
+  closingCosts: real("closing_costs").notNull().default(0),     // % of purchase
+  renovationBudget: real("renovation_budget").notNull().default(0),
+  equityIn: real("equity_in").notNull().default(0),             // total equity invested $
+
+  // ── Income (Year 1)
+  grossPotentialRent: real("gross_potential_rent").notNull().default(0), // annual
+  vacancyRate: real("vacancy_rate").notNull().default(5),        // %
+  otherIncome: real("other_income").notNull().default(0),        // parking, laundry, etc.
+
+  // ── Expenses (Year 1)
+  operatingExpenses: real("operating_expenses").notNull().default(0), // annual total OpEx
+  managementFeeRate: real("management_fee_rate").notNull().default(8), // % of EGI
+  capexReserve: real("capex_reserve").notNull().default(0),      // annual CapEx reserve
+
+  // ── Debt
+  loanAmount: real("loan_amount").notNull().default(0),
+  interestRate: real("interest_rate").notNull().default(7),      // annual %
+  amortizationYears: integer("amortization_years").notNull().default(30),
+  interestOnly: integer("interest_only").notNull().default(0),   // 0=false,1=true
+  ioYears: integer("io_years").notNull().default(0),             // years of I/O before amort
+
+  // ── Proforma assumptions
+  holdYears: integer("hold_years").notNull().default(5),
+  rentGrowthRate: real("rent_growth_rate").notNull().default(3),  // % per year
+  expenseGrowthRate: real("expense_growth_rate").notNull().default(2), // % per year
+  exitCapRate: real("exit_cap_rate").notNull().default(5.5),      // % for exit valuation
+  sellingCosts: real("selling_costs").notNull().default(2),       // % of exit value
+
+  // ── Preferred return
+  preferredReturn: real("preferred_return").notNull().default(8), // % pref to LP
+
+  notes: text("notes"),
+});
+
+export const insertUnderwritingSchema = createInsertSchema(underwriting).omit({ id: true });
+export type InsertUnderwriting = z.infer<typeof insertUnderwritingSchema>;
+export type UnderwritingDeal = typeof underwriting.$inferSelect;
