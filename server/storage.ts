@@ -50,7 +50,7 @@ sqlite.exec(`
     name TEXT NOT NULL, address TEXT NOT NULL, type TEXT NOT NULL,
     status TEXT NOT NULL, total_budget REAL NOT NULL, spent_to_date REAL NOT NULL DEFAULT 0,
     projected_noi REAL, units INTEGER, sqft INTEGER,
-    start_date TEXT NOT NULL, expected_completion TEXT, equity REAL, notes TEXT
+    start_date TEXT NOT NULL, expected_completion TEXT, equity REAL, notes TEXT, deal_id INTEGER
   );
   CREATE TABLE IF NOT EXISTS deals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +177,7 @@ function addColumnIfMissing(table: string, column: string, ddl: string) {
 }
 addColumnIfMissing("tasks", "deal_id", "deal_id INTEGER");
 addColumnIfMissing("underwriting", "deal_id", "deal_id INTEGER");
+addColumnIfMissing("projects", "deal_id", "deal_id INTEGER");
 
 // Link models created from an OM before linking existed (named "D-2026-001 …").
 {
@@ -195,6 +196,7 @@ export interface IStorage {
   // Projects
   getProjects(): Project[];
   getProject(id: number): Project | undefined;
+  getProjectForDeal(dealId: number): Project | undefined;
   createProject(data: InsertProject): Project;
   updateProject(id: number, data: Partial<InsertProject>): Project | undefined;
   deleteProject(id: number): void;
@@ -266,6 +268,7 @@ export class DatabaseStorage implements IStorage {
   // Projects
   getProjects() { return db.select().from(projects).all(); }
   getProject(id: number) { return db.select().from(projects).where(eq(projects.id, id)).get(); }
+  getProjectForDeal(dealId: number) { return db.select().from(projects).where(eq(projects.dealId, dealId)).get(); }
   createProject(data: InsertProject) { return db.insert(projects).values(data).returning().get(); }
   updateProject(id: number, data: Partial<InsertProject>) { return db.update(projects).set(data).where(eq(projects.id, id)).returning().get(); }
 
@@ -283,7 +286,7 @@ export class DatabaseStorage implements IStorage {
   updatePipelineDeal(id: number, data: Partial<PipelineDeal>) {
     return db.update(pipeline).set({ ...data, updatedAt: new Date().toISOString() }).where(eq(pipeline.id, id)).returning().get();
   }
-  // Deleting a deal removes everything that belongs to it.
+  // Deleting a deal removes everything that belongs to it. Its project (if any) is kept, unlinked.
   deletePipelineDeal(id: number) {
     const files = db.select().from(dealFiles).where(eq(dealFiles.dealId, id)).all();
     sqlite.transaction(() => {
@@ -292,6 +295,7 @@ export class DatabaseStorage implements IStorage {
       db.delete(dealActivity).where(eq(dealActivity.dealId, id)).run();
       db.delete(tasks).where(eq(tasks.dealId, id)).run();
       db.delete(underwriting).where(eq(underwriting.dealId, id)).run();
+      db.update(projects).set({ dealId: null }).where(eq(projects.dealId, id)).run();
       db.delete(pipeline).where(eq(pipeline.id, id)).run();
       deleteState(`loi:${id}`);
     })();
@@ -351,6 +355,7 @@ export class DatabaseStorage implements IStorage {
       activity: count("SELECT COUNT(*) AS n FROM deal_activity WHERE deal_id = ?"),
       files: count("SELECT COUNT(*) AS n FROM deal_files WHERE deal_id = ?"),
       milestones: count("SELECT COUNT(*) AS n FROM deal_milestones WHERE deal_id = ?"),
+      projects: count("SELECT COUNT(*) AS n FROM projects WHERE deal_id = ?"),
     };
   }
   // Deleting a project removes its cash flow, investors, documents, tasks and loans,

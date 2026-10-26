@@ -125,7 +125,11 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 - Never log response bodies or deal data (the request logger logs method, path, status, time only).
 - Writing in the UI: plain language, sentence case, no jargon. Keep the existing visual style.
 - **Lifecycle: deal → project → property.** A deal becomes a project when the PSA is signed
-  (decided 2026-10-26), not at closing. Owned, operating assets will become properties (not built yet).
+  (decided 2026-10-26), not at closing: entering Due Diligence, Closing or Closed creates a linked
+  project (`projects.deal_id`) via `syncProject()` in `routes.ts`. Closed moves it to planning; Dead or
+  moving back before DD sets it to cancelled (never deleted); reviving reopens it. Deleting a deal
+  keeps its project, unlinked. Project vocabulary and `projectFromDeal()` live in `shared/projects.ts`.
+  Owned, operating assets will become properties (not built yet).
 
 ## Testing
 
@@ -163,6 +167,6 @@ There is no test suite. What has worked:
 - Forward an email to a `deals@` address to create a deal from the attached OM.
 - Broker follow-up email drafts (draft only; send needs approval).
 - Closing checklist on moving to Closing.
-- Deal → project link at PSA signing (entering Due Diligence), then budget vs. actual and draws.
+- Project budget vs. actual by line item, and construction draws.
 - Properties tab for owned assets (rent roll, leases, monthly reporting-package upload).
 - Separate logins per partner so the activity log shows who did what.

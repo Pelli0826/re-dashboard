@@ -12,8 +12,10 @@ import {
   type Stage, type DevelopmentScenario, type Deadline, milestoneAlerts, nextDeadlineWithMilestones, daysUntil,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check, FileText,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check, FileText, Building2,
 } from "lucide-react";
+import type { Project } from "@shared/schema";
+import { PSA_STAGES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import { LoiDialog } from "@/components/LoiDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -116,7 +118,14 @@ export default function Pipeline() {
   const [tempFilter, setTempFilter] = useState("all");
   const [showInactive, setShowInactive] = useState(false);
   const [formDeal, setFormDeal] = useState<PipelineDeal | "new" | null>(null);
-  const [detailId, setDetailId] = useState<number | null>(null);
+  // Opened from another tab (e.g. a project's "Open deal" button).
+  const [detailId, setDetailId] = useState<number | null>(() => {
+    try {
+      const id = Number(sessionStorage.getItem(OPEN_DEAL_KEY));
+      sessionStorage.removeItem(OPEN_DEAL_KEY);
+      return id || null;
+    } catch { return null; }
+  });
   const [deadTarget, setDeadTarget] = useState<PipelineDeal | null>(null);
   const [intake, setIntake] = useState<Intake | null>(null);
   const [reading, setReading] = useState<string | null>(null);
@@ -149,6 +158,7 @@ export default function Pipeline() {
   const refresh = (id?: number) => {
     qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
     qc.invalidateQueries({ queryKey: ["/api/tasks"] });
+    qc.invalidateQueries({ queryKey: ["/api/projects"] }); // stage moves create or update the deal's project
     if (id) qc.invalidateQueries({ queryKey: ["/api/pipeline", id, "activity"] });
   };
 
@@ -159,7 +169,7 @@ export default function Pipeline() {
       refresh(v.id);
       toast({
         title: `Moved to ${STAGE_LABELS[v.stage as Stage]}`,
-        description: v.stage === "due-diligence" ? "Due diligence checklist added to Tasks." : undefined,
+        description: v.stage === "due-diligence" ? "Due diligence checklist added to Tasks; project set up on the Projects tab." : undefined,
       });
     },
     onError: (e: Error) => toast({ title: "Could not change stage", description: e.message, variant: "destructive" }),
@@ -194,6 +204,7 @@ export default function Pipeline() {
         plural(c.files ?? 0, "saved file"),
         plural(c.milestones ?? 0, "milestone"),
       ].filter((x): x is string => !!x),
+      keeps: c.projects ? ["its project on the Projects tab (unlinked, not deleted)"] : [],
       confirmLabel: "Delete deal",
     });
     if (ok) remove.mutate(d.id);
@@ -556,6 +567,49 @@ function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
           </div>
         );
       })}
+    </section>
+  );
+}
+
+// ── Project: the deal becomes a project when the PSA is signed ─────────────
+export const OPEN_DEAL_KEY = "openDealId";
+
+function DealProject({ deal }: { deal: PipelineDeal }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [, navigate] = useLocation();
+  const { data: projects = [] } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
+  const project = projects.find(p => p.dealId === deal.id);
+  const create = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/pipeline/${deal.id}/project`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/projects"] });
+      qc.invalidateQueries({ queryKey: ["/api/pipeline", deal.id, "activity"] });
+      toast({ title: "Project created", description: "It's on the Projects tab, linked to this deal." });
+    },
+    onError: (e: Error) => toast({ title: "Could not create project", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
+  });
+  if (!project && !PSA_STAGES.includes(deal.stage)) return null;
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5"><Building2 size={14} /> Project</h3>
+      {project ? (
+        <div className="rounded-md border border-border p-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm">
+            <span className="font-medium text-foreground">{project.name}</span>
+            <span className="text-muted-foreground">: {PROJECT_STATUS_LABELS[project.status] ?? project.status}, budget {fmtMoney(project.totalBudget)}</span>
+          </div>
+          <Button size="sm" variant="ghost" className="gap-1 h-7" onClick={() => navigate("/projects")}><Building2 size={13} /> Open in Projects</Button>
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed border-border p-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm text-muted-foreground">This deal is under contract but has no project yet.</p>
+          <Button size="sm" variant="outline" className="gap-1" onClick={() => create.mutate()} disabled={create.isPending}>
+            {create.isPending ? <Loader2 size={13} className="animate-spin" /> : <Building2 size={13} />} Create project
+          </Button>
+        </div>
+      )}
     </section>
   );
 }
@@ -1024,6 +1078,8 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
             </section>}
 
             <UnderwritingSummary deal={deal} />
+
+            <DealProject deal={deal} />
 
             <DealMilestones deal={deal} />
 

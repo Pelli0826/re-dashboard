@@ -2,12 +2,16 @@ import { useState } from "react";
 import { useConfirm, plural } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { Project, InsertProject } from "@shared/schema";
+import type { Project, InsertProject, PipelineDeal, DealMilestone, Task } from "@shared/schema";
+import { PROJECT_STATUSES, PROJECT_STATUS_LABELS } from "@shared/projects";
+import { STAGE_LABELS, type Stage } from "@shared/pipeline";
+import { OPEN_DEAL_KEY } from "./Pipeline";
+import { useLocation } from "wouter";
 import { insertProjectSchema } from "@shared/schema";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Plus, Pencil, Trash2, Loader2, X } from "lucide-react";
+import { Plus, Pencil, Trash2, Loader2, X, Flag, ListChecks, ExternalLink } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -26,13 +30,49 @@ function fmt(n: number | null | undefined): string {
 }
 
 const statusColor: Record<string, string> = {
+  "under-contract": "bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300",
   planning: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
   entitlement: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
   construction: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
   "lease-up": "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
   stabilized: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   disposition: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
+  cancelled: "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300",
 };
+
+const fmtDay = (ymd: string | null) => ymd ? new Date(`${ymd}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "No date";
+
+// The pipeline deal a project came from: its stage, open milestones and open tasks.
+function FromDeal({ deal, milestones, tasks }: { deal: PipelineDeal; milestones: DealMilestone[]; tasks: Task[] }) {
+  const [, navigate] = useLocation();
+  const open = milestones.filter(m => m.dealId === deal.id && m.status !== "done")
+    .sort((a, b) => (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999"));
+  const openTasks = tasks.filter(t => t.dealId === deal.id && t.status !== "done").length;
+  const openDeal = () => {
+    try { sessionStorage.setItem(OPEN_DEAL_KEY, String(deal.id)); } catch { /* storage unavailable */ }
+    navigate("/pipeline");
+  };
+  return (
+    <div className="rounded-md border border-border p-2.5 space-y-1.5 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-muted-foreground">From deal <span className="font-medium text-foreground">{deal.dealCode}</span>, {STAGE_LABELS[deal.stage as Stage] ?? deal.stage}</span>
+        <button onClick={openDeal} className="inline-flex items-center gap-1 text-primary hover:underline shrink-0"><ExternalLink size={11} /> Open deal</button>
+      </div>
+      {open.slice(0, 3).map(m => (
+        <div key={m.id} className="flex items-center gap-1.5 text-foreground">
+          <Flag size={11} className="text-muted-foreground shrink-0" />
+          <span className="truncate">{m.name}</span>
+          <span className="ml-auto text-muted-foreground whitespace-nowrap">{fmtDay(m.dueDate)}</span>
+        </div>
+      ))}
+      {open.length > 3 && <div className="text-muted-foreground">and {open.length - 3} more milestone{open.length - 3 === 1 ? "" : "s"}</div>}
+      <div className="flex items-center gap-1.5 text-muted-foreground">
+        <ListChecks size={11} className="shrink-0" />
+        {openTasks ? `${openTasks} open task${openTasks === 1 ? "" : "s"}` : "No open tasks"}
+      </div>
+    </div>
+  );
+}
 
 const formSchema = insertProjectSchema.extend({
   totalBudget: z.coerce.number().positive("Required"),
@@ -52,6 +92,9 @@ export default function Projects() {
   const [editing, setEditing] = useState<Project | null>(null);
 
   const { data: projects = [], isLoading } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
+  const { data: deals = [] } = useQuery<PipelineDeal[]>({ queryKey: ["/api/pipeline"] });
+  const { data: milestones = [] } = useQuery<DealMilestone[]>({ queryKey: ["/api/milestones"] });
+  const { data: tasks = [] } = useQuery<Task[]>({ queryKey: ["/api/tasks"] });
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -131,7 +174,8 @@ export default function Projects() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {projects.map(p => {
-          const progress = Math.min(100, Math.round((p.spentToDate / p.totalBudget) * 100));
+          const progress = p.totalBudget > 0 ? Math.min(100, Math.round((p.spentToDate / p.totalBudget) * 100)) : 0;
+          const deal = p.dealId ? deals.find(d => d.id === p.dealId) : undefined;
           return (
             <Card key={p.id} data-testid={`card-project-${p.id}`} className="flex flex-col">
               <CardHeader className="pb-2">
@@ -150,7 +194,7 @@ export default function Projects() {
                   </div>
                 </div>
                 <div className="flex gap-1.5 mt-1 flex-wrap">
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor[p.status]}`}>{p.status}</span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor[p.status]}`}>{PROJECT_STATUS_LABELS[p.status] ?? p.status}</span>
                   <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium capitalize">{p.type}</span>
                 </div>
               </CardHeader>
@@ -196,6 +240,7 @@ export default function Projects() {
                     <div className={`h-1.5 rounded-full transition-all ${progress > 90 ? "bg-destructive" : progress > 70 ? "bg-orange-500" : "bg-primary"}`} style={{ width: `${progress}%` }} />
                   </div>
                 </div>
+                {deal && <FromDeal deal={deal} milestones={milestones} tasks={tasks} />}
                 {p.notes && <p className="text-xs text-muted-foreground italic">{p.notes}</p>}
               </CardContent>
             </Card>
@@ -246,12 +291,7 @@ export default function Projects() {
                     <Select value={field.value} onValueChange={field.onChange}>
                       <FormControl><SelectTrigger data-testid="select-project-status"><SelectValue /></SelectTrigger></FormControl>
                       <SelectContent>
-                        <SelectItem value="planning">Planning</SelectItem>
-                        <SelectItem value="entitlement">Entitlement</SelectItem>
-                        <SelectItem value="construction">Construction</SelectItem>
-                        <SelectItem value="lease-up">Lease-Up</SelectItem>
-                        <SelectItem value="stabilized">Stabilized</SelectItem>
-                        <SelectItem value="disposition">Disposition</SelectItem>
+                        {PROJECT_STATUSES.map(s => <SelectItem key={s} value={s}>{PROJECT_STATUS_LABELS[s]}</SelectItem>)}
                       </SelectContent>
                     </Select>
                     <FormMessage />

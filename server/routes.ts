@@ -11,6 +11,7 @@ import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting
 import { storage, DB_IS_PERSISTENT, getState, setState, deleteState } from "./storage";
 import { buildLoiDocx } from "./loi";
 import { defaultLoiTerms, type LoiTerms } from "@shared/loi";
+import { projectFromDeal, PSA_STAGES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import {
   STAGES, DEAL_TYPES, ACTIVITY_KINDS, STAGE_LABELS, daysSince, type Stage,
   isYmd, addDaysYmd, addMonthsYmd, diffDaysYmd,
@@ -172,6 +173,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const today = new Date().toISOString().slice(0, 10);
     storage.addDealActivity(deal.id, deal.firstContactDate || today, "created", `Deal added in ${STAGE_LABELS[deal.stage as Stage]}`);
     if (deal.stage === "due-diligence") createDueDiligenceTasks(deal);
+    if (PSA_STAGES.includes(deal.stage)) createProjectForDeal(deal);
     res.status(201).json(storage.getPipelineDeal(deal.id));
   });
 
@@ -216,9 +218,41 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (newStage === "dead" && updated.deadReason) summary += `. Reason: ${updated.deadReason}`;
       storage.addDealActivity(id, todayYmd(), "stage-change", summary);
       if (newStage === "due-diligence") createDueDiligenceTasks(updated);
+      syncProject(updated);
     }
     return { status: 200, body: storage.getPipelineDeal(id) };
   }
+
+  // A deal becomes a project when the PSA is signed (Due Diligence or later). The project then
+  // follows the deal: Closed moves it to planning, Dead cancels it (kept, not deleted), reviving reopens it.
+  function createProjectForDeal(deal: PipelineDeal) {
+    const uw = storage.getUnderwritingDeals().find(u => u.dealId === deal.id);
+    const p = storage.createProject(projectFromDeal(deal, uw, todayYmd()));
+    storage.addDealActivity(deal.id, todayYmd(), "note",
+      `Project created on the Projects tab (${PROJECT_STATUS_LABELS[p.status]}, budget $${Math.round(p.totalBudget).toLocaleString("en-US")}${uw ? ` from "${uw.name}"` : ""}).`);
+    return p;
+  }
+  function syncProject(deal: PipelineDeal) {
+    const p = storage.getProjectForDeal(deal.id);
+    const setStatus = (status: string) => {
+      storage.updateProject(p!.id, { status });
+      storage.addDealActivity(deal.id, todayYmd(), "note", `Project status: ${PROJECT_STATUS_LABELS[p!.status] ?? p!.status} → ${PROJECT_STATUS_LABELS[status]}.`);
+    };
+    if (PSA_STAGES.includes(deal.stage)) {
+      if (!p) { createProjectForDeal(deal); return; }
+      if (p.status === "cancelled") setStatus(deal.stage === "closed" ? "planning" : "under-contract");
+      else if (deal.stage === "closed" && p.status === "under-contract") setStatus("planning");
+    } else if (p && p.status === "under-contract") {
+      // Dead, or moved back before the PSA (e.g. the contract fell through and talks continue).
+      setStatus("cancelled");
+    }
+  }
+  app.post("/api/pipeline/:id/project", (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    if (storage.getProjectForDeal(deal.id)) return res.status(409).json({ message: "This deal already has a project." });
+    res.status(201).json(createProjectForDeal(deal));
+  });
 
   app.patch("/api/pipeline/:id", (req, res) => {
     const r = updateDeal(Number(req.params.id), req.body);

@@ -18,6 +18,7 @@ export const projects = sqliteTable("projects", {
   expectedCompletion: text("expected_completion"),
   equity: real("equity"),
   notes: text("notes"),
+  dealId: integer("deal_id"),                        // pipeline deal this project came from (set at PSA signing)
 });
 
 export const insertProjectSchema = createInsertSchema(projects).omit({ id: true });
