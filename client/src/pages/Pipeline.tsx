@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { PipelineDeal, Contact, DealActivity, Task, UnderwritingDeal, DealFile } from "@shared/schema";
+import type { PipelineDeal, Contact, DealActivity, Task, UnderwritingDeal, DealFile, DealMilestone } from "@shared/schema";
 import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting";
 import { useLocation } from "wouter";
 import {
@@ -9,10 +9,10 @@ import {
   TEMPERATURES, COMPETITION_LEVELS, MOTIVATION_LEVELS, DEAD_REASONS, ACTIVITY_KINDS, ACTIVITY_LABELS,
   DEADLINE_FIELDS, STAGE_DEADLINES, STAGE_PROBABILITY,
   effectiveProbability, daysSince, parseScenarios, nextDeadline, dealAlerts,
-  type Stage, type DevelopmentScenario, type Deadline,
+  type Stage, type DevelopmentScenario, type Deadline, milestoneAlerts, nextDeadlineWithMilestones, daysUntil,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -142,6 +142,7 @@ export default function Pipeline() {
 
   const { data: deals = [], isLoading } = useQuery<PipelineDeal[]>({ queryKey: ["/api/pipeline"] });
   const { data: contacts = [] } = useQuery<Contact[]>({ queryKey: ["/api/contacts"] });
+  const { data: milestones = [] } = useQuery<DealMilestone[]>({ queryKey: ["/api/milestones"] });
   const contactMap = useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c])), [contacts]);
 
   const refresh = (id?: number) => {
@@ -190,6 +191,7 @@ export default function Pipeline() {
         plural(c.underwriting ?? 0, "underwriting model"),
         plural(c.activity ?? 0, "activity log entry", "activity log entries"),
         plural(c.files ?? 0, "saved file"),
+        plural(c.milestones ?? 0, "milestone"),
       ].filter((x): x is string => !!x),
       confirmLabel: "Delete deal",
     });
@@ -210,7 +212,8 @@ export default function Pipeline() {
 
   const active = filtered.filter(d => ACTIVE_STAGES.includes(d.stage as Stage));
   const inactive = filtered.filter(d => !ACTIVE_STAGES.includes(d.stage as Stage));
-  const alerts = useMemo(() => dealAlerts(deals), [deals]);
+  const alerts = useMemo(() => [...dealAlerts(deals), ...milestoneAlerts(milestones, deals)]
+    .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "high" ? -1 : 1)), [deals, milestones]);
 
   const allActive = deals.filter(d => ACTIVE_STAGES.includes(d.stage as Stage));
   const askingTotal = allActive.reduce((s, d) => s + (d.askingPrice ?? 0), 0);
@@ -334,7 +337,7 @@ export default function Pipeline() {
                   </div>
                   {col.length === 0 && <div className="rounded-lg border border-dashed border-border h-16" />}
                   {col.map(d => {
-                    const dl = nextDeadline(d);
+                    const dl = nextDeadlineWithMilestones(d, milestones);
                     const inStage = daysSince(d.stageChangedAt) ?? 0;
                     return (
                       <button
@@ -392,7 +395,7 @@ export default function Pipeline() {
                 <tbody className="divide-y divide-border">
                   {[...active, ...(showInactive ? inactive : [])].map(d => {
                     const broker = d.brokerContactId ? contactMap[d.brokerContactId] : undefined;
-                    const dl = nextDeadline(d);
+                    const dl = nextDeadlineWithMilestones(d, milestones);
                     return (
                       <tr key={d.id} className="hover:bg-muted/40 cursor-pointer" onClick={() => setDetailId(d.id)}>
                         <td className="px-4 py-2.5 min-w-[220px]">
@@ -556,6 +559,154 @@ function UnderwritingSummary({ deal }: { deal: PipelineDeal }) {
   );
 }
 
+// ── Milestones: contract deadlines and approvals ────────────────────────────
+function DealMilestones({ deal }: { deal: PipelineDeal }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const { data: all = [] } = useQuery<DealMilestone[]>({ queryKey: ["/api/milestones"] });
+  const items = all.filter(m => m.dealId === deal.id)
+    .sort((a, b) => (a.status === b.status ? 0 : a.status === "done" ? 1 : -1) || (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999"));
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState({ name: "", dueDate: "", notes: "" });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["/api/milestones"] });
+    qc.invalidateQueries({ queryKey: ["/api/pipeline", deal.id, "activity"] });
+  };
+  const onError = (e: Error) => toast({ title: "Could not save milestone", description: e.message, variant: "destructive" });
+  const add = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/pipeline/${deal.id}/milestones`, {
+      name: draft.name.trim(), dueDate: draft.dueDate || null, notes: draft.notes.trim() || null,
+    }),
+    onSuccess: () => { refresh(); setDraft({ name: "", dueDate: "", notes: "" }); setAdding(false); },
+    onError,
+  });
+  const update = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: Record<string, unknown> }) => apiRequest("PATCH", `/api/milestones/${id}`, data),
+    onSuccess: refresh, onError,
+  });
+  const remove = useMutation({ mutationFn: (id: number) => apiRequest("DELETE", `/api/milestones/${id}`), onSuccess: refresh });
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5"><Flag size={14} /> Milestones</h3>
+        {!adding && <Button size="sm" variant="ghost" className="gap-1 h-7" onClick={() => setAdding(true)}><Plus size={13} /> Add</Button>}
+      </div>
+      {items.length === 0 && !adding && (
+        <p className="text-sm text-muted-foreground">Contract deadlines beyond DD and closing, such as a rezoning petition or final plan approval. Claude can propose these from the PSA.</p>
+      )}
+      {items.length > 0 && (
+        <ul className="divide-y divide-border rounded-md border border-border">
+          {items.map(m => {
+            const days = daysUntil(m.dueDate);
+            const done = m.status === "done";
+            const tone = done ? "text-muted-foreground" : days == null ? "text-muted-foreground" : days < 0 ? "text-red-700 dark:text-red-300" : days <= 14 ? "text-orange-700 dark:text-orange-300" : "text-muted-foreground";
+            return (
+              <li key={m.id} className="flex items-start gap-2 px-3 py-2">
+                <button aria-label={done ? `Reopen ${m.name}` : `Mark ${m.name} done`} className="mt-0.5 shrink-0"
+                  onClick={() => update.mutate({ id: m.id, data: { status: done ? "open" : "done" } })}>
+                  {done ? <CheckCircle2 size={15} className="text-green-600" /> : <Circle size={15} className="text-muted-foreground" />}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <div className={`text-sm ${done ? "line-through text-muted-foreground" : "text-foreground"}`}>{m.name}</div>
+                  {m.notes && <div className="text-xs text-muted-foreground">{m.notes}</div>}
+                </div>
+                <div className="text-right shrink-0">
+                  <Input type="date" defaultValue={m.dueDate ?? ""} aria-label={`Date for ${m.name}`} className="h-7 w-[140px] text-xs"
+                    onBlur={e => { const v = e.target.value || null; if (v !== m.dueDate) update.mutate({ id: m.id, data: { dueDate: v } }); }} />
+                  <div className={`text-[11px] mt-0.5 ${tone}`}>
+                    {done ? "Done" : days == null ? "Date not set" : days < 0 ? `${-days}d overdue` : days === 0 ? "Today" : days > 90 ? `In ${Math.round(days / 30.4)} months` : `In ${days}d`}
+                  </div>
+                </div>
+                <button aria-label={`Delete ${m.name}`} className="p-1 text-muted-foreground hover:text-destructive"
+                  onClick={async () => { if (await confirm({ title: `Delete milestone "${m.name}"?` })) remove.mutate(m.id); }}>
+                  <Trash2 size={13} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {adding && (
+        <form className="space-y-2 rounded-md border border-dashed border-border p-3" onSubmit={e => { e.preventDefault(); if (draft.name.trim()) add.mutate(); }}>
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_150px] gap-2">
+            <Input autoFocus value={draft.name} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} placeholder="e.g. Rezoning petition filed" aria-label="Milestone name" />
+            <Input type="date" value={draft.dueDate} onChange={e => setDraft(d => ({ ...d, dueDate: e.target.value }))} aria-label="Milestone date" />
+          </div>
+          <Input value={draft.notes} onChange={e => setDraft(d => ({ ...d, notes: e.target.value }))} placeholder="Contract basis, e.g. PSA §4.1: within 120 days after Inspection Period" aria-label="Milestone notes" />
+          <div className="flex justify-end gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={() => setAdding(false)}>Cancel</Button>
+            <Button type="submit" size="sm" disabled={!draft.name.trim() || add.isPending}>Add milestone</Button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+// ── Suggested changes from Claude ───────────────────────────────────────────
+interface Proposal {
+  type: string; reason: string; summary: string; ruleText?: string; problem?: string; date?: string | null;
+  [key: string]: unknown;
+}
+
+function ProposalCards({ deal, proposals }: { deal: PipelineDeal; proposals: Proposal[] }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [state, setState] = useState<Record<number, "applied" | "dismissed" | "busy">>({});
+  async function apply(i: number) {
+    setState(s => ({ ...s, [i]: "busy" }));
+    try {
+      await apiRequest("POST", `/api/pipeline/${deal.id}/apply`, proposals[i]);
+      setState(s => ({ ...s, [i]: "applied" }));
+      qc.invalidateQueries(); // dates, tasks, milestones and the activity log may all have changed
+    } catch (e: any) {
+      setState(s => { const n = { ...s }; delete n[i]; return n; });
+      toast({ title: "Could not apply", description: String(e.message).replace(/^\d+:\s*/, "").replace(/^\{"message":"|"\}$/g, ""), variant: "destructive" });
+    }
+  }
+  const pending = proposals.map((_, i) => i).filter(i => !state[i] && !proposals[i].problem);
+  async function applyAll() { for (const i of pending) await apply(i); }
+
+  return (
+    <div className="space-y-2" aria-label="Suggested changes">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-foreground">Suggested changes ({proposals.length})</span>
+        {pending.length > 1 && <Button size="sm" variant="outline" className="h-7" onClick={applyAll}>Apply all {pending.length}</Button>}
+      </div>
+      {proposals.map((p, i) => {
+        const st = state[i];
+        return (
+          <div key={i} className={`rounded-md border px-3 py-2 text-sm ${st === "applied" ? "border-green-300 bg-green-50 dark:bg-green-900/20 dark:border-green-800" : st === "dismissed" ? "border-border opacity-50" : "border-border"}`}>
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <div className="font-medium text-foreground">{p.summary}</div>
+                {p.ruleText && <div className="text-xs text-muted-foreground">Date: {p.ruleText}{p.date ? ` = ${fmtDate(p.date)}` : ""}</div>}
+                {p.reason && <div className="text-xs text-muted-foreground">{p.reason}</div>}
+                {p.problem && <div className="text-xs text-red-700 dark:text-red-300">{p.problem}</div>}
+              </div>
+              {st === "applied" ? (
+                <span className="text-xs text-green-700 dark:text-green-300 flex items-center gap-1 shrink-0"><Check size={13} /> Applied</span>
+              ) : st === "dismissed" ? (
+                <span className="text-xs text-muted-foreground shrink-0">Dismissed</span>
+              ) : (
+                <div className="flex gap-1 shrink-0">
+                  <Button size="sm" className="h-7" disabled={st === "busy" || !!p.problem} onClick={() => apply(i)}>
+                    {st === "busy" ? <Loader2 size={13} className="animate-spin" /> : "Apply"}
+                  </Button>
+                  <Button size="sm" variant="ghost" className="h-7" onClick={() => setState(s => ({ ...s, [i]: "dismissed" }))}>Dismiss</Button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      <p className="text-xs text-muted-foreground">Check each against the documents before applying. Applied changes are noted in the activity log.</p>
+    </div>
+  );
+}
+
 // ── Files saved to the deal ────────────────────────────────────────────────
 function fmtSize(n: number) { return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`; }
 
@@ -623,12 +774,13 @@ function DealFiles({ deal }: { deal: PipelineDeal }) {
 }
 
 // ── Ask about this deal ─────────────────────────────────────────────────────
-interface QA { question: string; answer: string; filesUsed: string[]; saved?: boolean }
+interface QA { question: string; answer: string; filesUsed: string[]; filesSkipped?: string[]; proposals?: Proposal[]; saved?: boolean }
 const SUGGESTED = [
   "Summarize this deal for my partner",
   "What are the biggest risks, and what would resolve them?",
   "What has the broker told us so far?",
   "What should we ask for before submitting an LOI?",
+  "Set up milestones and task dates from the PSA",
 ];
 
 function AskDeal({ deal }: { deal: PipelineDeal }) {
@@ -666,13 +818,17 @@ function AskDeal({ deal }: { deal: PipelineDeal }) {
         <p className="text-sm text-muted-foreground">Add ANTHROPIC_API_KEY in Railway to turn this on.</p>
       ) : (
         <>
-          <p className="text-xs text-muted-foreground">Claude answers from this deal's saved PDFs, notes, activity log, tasks and underwriting, and says where each answer comes from.</p>
+          <p className="text-xs text-muted-foreground">Claude answers from this deal's saved PDFs and Word files, notes, activity log, tasks, milestones and underwriting, and says where each answer comes from. It can also suggest changes for you to apply.</p>
           {thread.map((t, i) => (
             <div key={i} className="space-y-1.5">
               <p className="text-sm font-medium text-foreground">{t.question}</p>
               <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-foreground whitespace-pre-line">{t.answer}</div>
+              {!!t.proposals?.length && <ProposalCards deal={deal} proposals={t.proposals} />}
               <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                <span>{t.filesUsed.length ? `Read: ${t.filesUsed.join(", ")}` : "No PDFs on this deal; answered from dashboard data"}</span>
+                <span>
+                  {t.filesUsed.length ? `Read: ${t.filesUsed.join(", ")}` : "No readable files on this deal; answered from dashboard data"}
+                  {t.filesSkipped?.length ? `. Couldn't read: ${t.filesSkipped.join(", ")}` : ""}
+                </span>
                 <button className="ml-auto hover:text-foreground disabled:opacity-60" disabled={t.saved || save.isPending} onClick={() => save.mutate(i)}>
                   {t.saved ? "Saved to activity" : "Save to activity log"}
                 </button>
@@ -749,7 +905,8 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
   });
 
   const scenarios = deal ? parseScenarios(deal.scenarios) : [];
-  const dl = deal ? nextDeadline(deal) : null;
+  const { data: dealMs = [] } = useQuery<DealMilestone[]>({ queryKey: ["/api/milestones"], enabled: !!deal });
+  const dl = deal ? nextDeadlineWithMilestones(deal, dealMs) : null;
 
   return (
     <Sheet open={!!deal} onOpenChange={o => { if (!o) onClose(); }}>
@@ -863,6 +1020,8 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
             </section>}
 
             <UnderwritingSummary deal={deal} />
+
+            <DealMilestones deal={deal} />
 
             <DealFiles deal={deal} />
 

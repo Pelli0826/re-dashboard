@@ -191,3 +191,59 @@ export function dealAlerts<T extends DealLike>(deals: T[], now = new Date()): De
   }
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "high" ? -1 : 1));
 }
+
+// ── Calendar date helpers (YYYY-MM-DD, no time zones) ────────────────────
+export function ymdToUtc(ymd: string): number {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+export function utcToYmd(t: number): string { return new Date(t).toISOString().slice(0, 10); }
+export function isYmd(s: unknown): boolean {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(ymdToUtc(s));
+}
+export function addDaysYmd(ymd: string, days: number): string { return utcToYmd(ymdToUtc(ymd) + days * 86_400_000); }
+/** Calendar months; the 31st plus one month lands on the last day of the next month. */
+export function addMonthsYmd(ymd: string, months: number): string {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const target = new Date(Date.UTC(y, m - 1 + months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(d, lastDay));
+  return utcToYmd(target.getTime());
+}
+export function diffDaysYmd(from: string, to: string): number { return Math.round((ymdToUtc(to) - ymdToUtc(from)) / 86_400_000); }
+
+// ── Milestones (contract deadlines beyond LOI / DD / closing) ────────────
+type MilestoneLike = { id: number; dealId: number; name: string; dueDate: string | null; status: string };
+
+export const MILESTONE_WINDOW_DAYS = 14;
+
+export function milestoneAlerts<T extends DealLike>(milestones: MilestoneLike[], deals: T[], now = new Date()): DealAlert<T>[] {
+  const byId = new Map(deals.map(d => [d.id, d]));
+  const out: DealAlert<T>[] = [];
+  for (const m of milestones) {
+    const deal = byId.get(m.dealId);
+    if (!deal || m.status === "done" || !m.dueDate || !ACTIVE_STAGES.includes(deal.stage as Stage)) continue;
+    const days = daysUntil(m.dueDate, now);
+    if (days == null || days > MILESTONE_WINDOW_DAYS) continue;
+    const when = days < 0 ? `${-days} day${days === -1 ? "" : "s"} overdue` : days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
+    out.push({
+      deal, kind: "deadline", severity: days <= 3 ? "high" : "medium",
+      deadline: { key: `milestone:${m.id}`, label: m.name, date: m.dueDate, days },
+      text: `${m.name} ${when} (${fmtShortDate(m.dueDate)})`,
+    });
+  }
+  return out;
+}
+
+/** The soonest open deadline for a deal: its stage dates or any open milestone. */
+export function nextDeadlineWithMilestones(d: DealLike, milestones: MilestoneLike[], now = new Date()): Deadline | null {
+  const options: Deadline[] = [];
+  const base = nextDeadline(d, now);
+  if (base) options.push(base);
+  for (const m of milestones) {
+    if (m.dealId !== d.id || m.status === "done" || !m.dueDate) continue;
+    const days = daysUntil(m.dueDate, now);
+    if (days != null) options.push({ key: `milestone:${m.id}`, label: m.name, date: m.dueDate, days });
+  }
+  return options.sort((a, b) => a.days - b.days)[0] ?? null;
+}

@@ -55,6 +55,14 @@ to download every table as one JSON file. Do this before any change to the Railw
   backup file lists files but doesn't contain them; they stay on the Railway volume.
 - **Ask about this deal**: Claude answers from the deal's saved PDFs, record, activity log, tasks
   and underwriting, citing its sources. Answers can be saved to the activity log.
+- **Milestones**: per-deal contract deadlines (rezoning petition, approvals, elections, deposit
+  releases). Open milestones due within 14 days show in Needs attention; within 7 days, in the
+  morning email.
+- **Suggested changes**: when you ask Claude to set up dates or tasks, it proposes changes as cards
+  with Apply buttons. Relative dates ("120 days after the Inspection Period") are computed by the
+  dashboard, not by Claude. Nothing changes until you click Apply; applied changes are logged.
+- **Checklist follows the DD date**: changing a deal's DD end date shifts its open due diligence
+  checklist tasks by the same number of days.
 - Vocabulary (stages, types, sources, default probabilities) lives in `shared/pipeline.ts`.
 
 ## Underwriting: maximum price

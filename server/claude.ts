@@ -117,25 +117,107 @@ Rules:
 - Answer only from the materials provided. If the answer isn't there, say so plainly and suggest who or what could answer it (e.g. ask the broker, order a survey).
 - Say where each fact comes from: the OM (with page number when you can), the activity log (with date), the deal record, or the underwriting model.
 - Use the underwriting figures exactly as given; they are calculated by the dashboard. Don't recompute returns with different assumptions unless asked, and label any of your own arithmetic as an estimate.
-- Be concise and direct. Plain text, short paragraphs; use a short list only when listing several items.`;
+- Be concise and direct. Plain text, short paragraphs; use a short list only when listing several items.
+
+Proposing changes:
+- You can propose changes to this deal's dates and prices, its tasks, and its milestones with the propose_changes tool. Use it when the user asks you to change, add or schedule something, or when your answer recommends specific changes to dates, tasks or milestones.
+- Proposals appear to the user as cards with Apply buttons. Nothing changes until they click. Never say you made a change; say you've proposed it.
+- For any date defined relative to another date (e.g. "within 120 days after the Inspection Period ends"), give a dateRule with the anchor and offset instead of calculating the date yourself; the dashboard does the arithmetic. Anchors can be a literal date, a deal date such as "deal.ddEndDate", or a milestone name such as "milestone:Rezoning petition filed" (including one proposed earlier in the same call).
+- If an anchor date isn't confirmed (e.g. the Effective Date), say so in the reason and use your best reading of the documents, or leave the date empty.
+- Use milestones for contract deadlines and approvals (rezoning petition, zoning approval, plan approval, elections, deposit releases). Use tasks for work someone has to do. Refer to existing tasks and milestones by the ids shown in the dashboard data.`;
+
+const DATE_FIELDS = ["firstContactDate", "loiDate", "loiExpiration", "contractDate", "ddEndDate", "closingDate"] as const;
+
+const PROPOSE_TOOL: ToolDef = {
+  name: "propose_changes",
+  description: "Propose changes to this deal for the user to review and apply. Nothing changes until the user clicks Apply.",
+  input_schema: {
+    type: "object",
+    properties: {
+      actions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            type: { type: "string", enum: ["set_deal_date", "set_deal_price", "add_task", "update_task", "add_milestone", "update_milestone"] },
+            reason: { type: "string", description: "One sentence: why, citing the source (e.g. 'PSA §2.2: 60-day Inspection Period from the Effective Date')." },
+            field: { type: "string", enum: [...DATE_FIELDS], description: "set_deal_date: which deal date" },
+            priceField: { type: "string", enum: ["askingPrice", "offerPrice"], description: "set_deal_price" },
+            amount: { type: "number", description: "set_deal_price: dollars" },
+            taskId: { type: "integer", description: "update_task: id from the dashboard data" },
+            milestoneId: { type: "integer", description: "update_milestone: id from the dashboard data" },
+            title: { type: "string", description: "add_task / update_task" },
+            priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+            name: { type: "string", description: "add_milestone / update_milestone: short name, e.g. 'Rezoning petition filed'" },
+            notes: { type: "string", description: "add_milestone: the contract requirement, e.g. 'PSA §4.1: within 120 days after Inspection Period ends'" },
+            status: { type: "string", enum: ["open", "done"], description: "update_task / update_milestone" },
+            date: { type: "string", description: "YYYY-MM-DD when the date is stated directly in the documents" },
+            dateRule: {
+              type: "object",
+              description: "Use instead of date when the date is relative to another date; the dashboard computes it.",
+              properties: {
+                from: { type: "string", description: "YYYY-MM-DD, or deal.<dateField>, or milestone:<name>" },
+                addDays: { type: "integer" },
+                addMonths: { type: "integer" },
+              },
+              required: ["from"],
+            },
+          },
+          required: ["type", "reason"],
+        },
+      },
+    },
+    required: ["actions"],
+  },
+};
 
 export async function askAboutDeal(opts: {
-  context: string; pdfs: { name: string; data: Buffer }[]; history: AskTurn[]; question: string;
-}): Promise<string> {
-  const docs = opts.pdfs.flatMap((p, i) => [
-    { type: "text", text: `File: ${p.name}` },
-    pdfBlock(p.data, i === opts.pdfs.length - 1), // cache the files so follow-up questions are cheaper
-  ]);
+  context: string;
+  pdfs: { name: string; data: Buffer }[];
+  texts?: { name: string; text: string }[];   // Word / CSV / text files, already converted to text
+  history: AskTurn[];
+  question: string;
+}): Promise<{ text: string; proposals: any[] }> {
+  const docs = [
+    ...opts.pdfs.flatMap((p, i) => [
+      { type: "text", text: `File: ${p.name}` },
+      pdfBlock(p.data, i === opts.pdfs.length - 1 && !opts.texts?.length), // cache files so follow-ups are cheaper
+    ]),
+    ...(opts.texts ?? []).map((t, i, all) => ({
+      type: "text",
+      text: `File: ${t.name}\n\n${t.text}`,
+      ...(i === all.length - 1 ? { cache_control: { type: "ephemeral" } } : {}),
+    })),
+  ];
   const messages: any[] = [
     { role: "user", content: [...docs, { type: "text", text: `Dashboard data for this deal:\n\n${opts.context}` }] },
     { role: "assistant", content: "I have the deal materials. What would you like to know?" },
     ...opts.history.slice(-8).map(t => ({ role: t.role, content: t.content })),
     { role: "user", content: opts.question },
   ];
-  const data = await postMessages({ system: ASK_SYSTEM, max_tokens: 2000, messages });
-  const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
-  if (!text) throw new Error("Claude returned an empty answer. Try rephrasing the question.");
-  return text;
+  const data = await postMessages({ system: ASK_SYSTEM, max_tokens: 4096, messages, tools: [PROPOSE_TOOL] });
+  let text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
+  const proposals = (data.content ?? [])
+    .filter((b: any) => b.type === "tool_use" && b.name === "propose_changes")
+    .flatMap((b: any) => (Array.isArray(b.input?.actions) ? b.input.actions : []));
+  const stop = data.stop_reason as string | undefined;
+
+  if (!text && proposals.length) text = "I've proposed the changes below. Review each one and click Apply to make it.";
+  if (!text) {
+    // Record exactly what came back so the cause shows in Railway's logs.
+    console.error(`[claude] empty answer: stop_reason=${stop} blocks=${JSON.stringify((data.content ?? []).map((b: any) => b.type))} usage=${JSON.stringify(data.usage ?? {})}`);
+    if (stop === "refusal") {
+      throw new Error("Claude declined to answer this question as worded. Try asking about specific terms, e.g. \"What are the deposit and due diligence terms in the agreement?\"");
+    }
+    if (stop === "max_tokens") {
+      throw new Error("Claude ran out of room before writing an answer. Ask a narrower question, e.g. one section of the agreement at a time.");
+    }
+    throw new Error(`Claude returned no text (reason: ${stop ?? "unknown"}). Try again; if it repeats, send this message to whoever maintains the dashboard.`);
+  }
+  if (stop === "max_tokens") {
+    text += `\n\n(The answer was cut off because it was long. Ask "continue" to get the rest.)`;
+  }
+  return { text, proposals };
 }
 
 // Used by the Underwriting page's existing per-document upload (om / rentroll / pl prompts).

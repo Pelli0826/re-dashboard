@@ -13,7 +13,7 @@
 
 import { storage, getState, setState } from "./storage";
 import {
-  ACTIVE_STAGES, STAGE_LABELS, dealAlerts, daysUntil, type Stage,
+  ACTIVE_STAGES, STAGE_LABELS, dealAlerts, milestoneAlerts, daysUntil, type Stage,
 } from "@shared/pipeline";
 import type { PipelineDeal, Task } from "@shared/schema";
 
@@ -67,8 +67,11 @@ export function buildDigest(at = new Date()): Digest {
 
   // Deal deadlines: overdue or within the next 3 days (Friday's email covers the weekend).
   const alerts = dealAlerts(active, noon);
-  const deadlines = alerts.filter(a => a.kind === "deadline" && a.deadline!.days <= 3)
-    .sort((a, b) => a.deadline!.days - b.deadline!.days);
+  // Contract milestones get a week's notice; stage deadlines get three days.
+  const deadlines = [
+    ...alerts.filter(a => a.kind === "deadline" && a.deadline!.days <= 3),
+    ...milestoneAlerts(storage.getAllMilestones(), active, noon).filter(a => a.deadline!.days <= 7),
+  ].sort((a, b) => a.deadline!.days - b.deadline!.days);
   const followUps = alerts.filter(a => a.kind !== "deadline");
 
   // Tasks: overdue, due today, or with a reminder set for today.
@@ -167,6 +170,8 @@ export async function sendDigest(opts: { test?: boolean } = {}): Promise<{ id?: 
   }
   return { id: body?.id, to: cfg.to };
 }
+
+export function clearDigestError() { setState(LAST_ERROR_KEY, ""); }
 
 export function digestStatus() {
   const cfg = digestConfig();

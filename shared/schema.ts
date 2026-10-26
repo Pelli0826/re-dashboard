@@ -104,6 +104,19 @@ export const dealFiles = sqliteTable("deal_files", {
 });
 export type DealFile = typeof dealFiles.$inferSelect;
 
+// ─── Deal Milestones (e.g. rezoning petition, final approvals) ────────────
+export const dealMilestones = sqliteTable("deal_milestones", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  dealId: integer("deal_id").notNull(),
+  name: text("name").notNull(),
+  dueDate: text("due_date"),                         // YYYY-MM-DD; null = date not known yet
+  status: text("status").notNull().default("open"),  // open | done
+  notes: text("notes"),                              // e.g. "PSA §4.1: within 120 days after Inspection Period"
+  completedAt: text("completed_at"),
+  createdAt: text("created_at").notNull(),
+});
+export type DealMilestone = typeof dealMilestones.$inferSelect;
+
 // ─── Deal Activity Log ─────────────────────────────────────────────────────
 export const dealActivity = sqliteTable("deal_activity", {
   id: integer("id").primaryKey({ autoIncrement: true }),

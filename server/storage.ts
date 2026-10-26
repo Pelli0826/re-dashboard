@@ -4,12 +4,12 @@ import fs from "fs";
 import crypto from "crypto";
 import path from "path";
 import {
-  projects, pipeline, dealActivity, dealFiles, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
+  projects, pipeline, dealActivity, dealFiles, dealMilestones, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
 } from "@shared/schema";
 import type {
   Project, InsertProject,
   PipelineDeal, InsertPipeline,
-  DealActivity, DealFile,
+  DealActivity, DealFile, DealMilestone,
   ArmLoan, InsertArmLoan,
   CashFlowEntry, InsertCashFlow,
   Contact, InsertContact,
@@ -82,6 +82,12 @@ sqlite.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_deal_files_deal ON deal_files(deal_id);
+  CREATE TABLE IF NOT EXISTS deal_milestones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER NOT NULL, name TEXT NOT NULL, due_date TEXT,
+    status TEXT NOT NULL DEFAULT 'open', notes TEXT, completed_at TEXT, created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_deal_milestones_deal ON deal_milestones(deal_id);
   CREATE TABLE IF NOT EXISTS arm_loans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     loan_name TEXT NOT NULL, project_id INTEGER, lender TEXT NOT NULL,
@@ -205,6 +211,12 @@ export interface IStorage {
   attachDealFile(id: number, dealId: number): DealFile | undefined;
   deleteDealFile(id: number): void;
   cleanupPendingFiles(): void;
+  getAllMilestones(): DealMilestone[];
+  getDealMilestones(dealId: number): DealMilestone[];
+  getMilestone(id: number): DealMilestone | undefined;
+  createMilestone(data: { dealId: number; name: string; dueDate: string | null; notes: string | null }): DealMilestone;
+  updateMilestone(id: number, data: Partial<Pick<DealMilestone, "name" | "dueDate" | "notes" | "status" | "completedAt">>): DealMilestone | undefined;
+  deleteMilestone(id: number): void;
   getDealActivity(dealId: number): DealActivity[];
   addDealActivity(dealId: number, date: string, kind: string, summary: string): DealActivity;
   // ARM
@@ -273,6 +285,7 @@ export class DatabaseStorage implements IStorage {
     const files = db.select().from(dealFiles).where(eq(dealFiles.dealId, id)).all();
     sqlite.transaction(() => {
       db.delete(dealFiles).where(eq(dealFiles.dealId, id)).run();
+      db.delete(dealMilestones).where(eq(dealMilestones.dealId, id)).run();
       db.delete(dealActivity).where(eq(dealActivity.dealId, id)).run();
       db.delete(tasks).where(eq(tasks.dealId, id)).run();
       db.delete(underwriting).where(eq(underwriting.dealId, id)).run();
@@ -280,6 +293,21 @@ export class DatabaseStorage implements IStorage {
     })();
     for (const f of files) removeStoredFile(f.storedName);
   }
+
+  // ── Deal milestones ──
+  getAllMilestones() { return db.select().from(dealMilestones).all(); }
+  getDealMilestones(dealId: number) {
+    return db.select().from(dealMilestones).where(eq(dealMilestones.dealId, dealId)).all()
+      .sort((a, b) => (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") || a.id - b.id);
+  }
+  getMilestone(id: number) { return db.select().from(dealMilestones).where(eq(dealMilestones.id, id)).get(); }
+  createMilestone(data: { dealId: number; name: string; dueDate: string | null; notes: string | null }) {
+    return db.insert(dealMilestones).values({ ...data, status: "open", createdAt: new Date().toISOString() }).returning().get();
+  }
+  updateMilestone(id: number, data: Partial<Pick<DealMilestone, "name" | "dueDate" | "notes" | "status" | "completedAt">>) {
+    return db.update(dealMilestones).set(data).where(eq(dealMilestones.id, id)).returning().get();
+  }
+  deleteMilestone(id: number) { db.delete(dealMilestones).where(eq(dealMilestones.id, id)).run(); }
 
   // ── Deal files ──
   saveDealFile(buffer: Buffer, name: string, mime: string, dealId: number | null, kind: string): DealFile {
@@ -318,6 +346,7 @@ export class DatabaseStorage implements IStorage {
       underwriting: count("SELECT COUNT(*) AS n FROM underwriting WHERE deal_id = ?"),
       activity: count("SELECT COUNT(*) AS n FROM deal_activity WHERE deal_id = ?"),
       files: count("SELECT COUNT(*) AS n FROM deal_files WHERE deal_id = ?"),
+      milestones: count("SELECT COUNT(*) AS n FROM deal_milestones WHERE deal_id = ?"),
     };
   }
   // Deleting a project removes its cash flow, investors, documents, tasks and loans,
@@ -373,7 +402,7 @@ export class DatabaseStorage implements IStorage {
   }
   // Full export of every table, for the Download backup button.
   exportAll() {
-    const tables = ["projects", "deals", "deal_activity", "deal_files", "arm_loans", "cash_flow", "contacts",
+    const tables = ["projects", "deals", "deal_activity", "deal_files", "deal_milestones", "arm_loans", "cash_flow", "contacts",
       "investors", "documents", "tasks", "underwriting"];
     const out: Record<string, unknown[]> = {};
     for (const t of tables) out[t] = sqlite.prepare(`SELECT * FROM ${t}`).all();
