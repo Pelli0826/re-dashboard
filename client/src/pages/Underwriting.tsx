@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { UnderwritingDeal, InsertUnderwriting, PipelineDeal } from "@shared/schema";
+import type { UnderwritingDeal, InsertUnderwriting, PipelineDeal, DealFile } from "@shared/schema";
 import { buildProforma, calcReturns, maxPriceForIrr, priceSensitivity, type LoanMode } from "@shared/underwriting";
 import { insertUnderwritingSchema } from "@shared/schema";
 import { useForm, Controller } from "react-hook-form";
@@ -174,6 +174,23 @@ export default function Underwriting() {
     setCalc(prev => ({ ...prev, [field]: value }));
   }, []);
 
+  // Merge figures read from a document into the inputs. Nothing is saved until the user clicks Save.
+  function applyExtracted(data: Record<string, any>, docType: string) {
+      setCalc(prev => ({
+        ...prev,
+        ...(data.dealName && !prev.name ? { name: data.dealName } : {}),
+        ...(data.address && !prev.address ? { address: data.address } : {}),
+        ...(data.dealType ? { dealType: data.dealType } : {}),
+        ...(data.purchasePrice != null ? { purchasePrice: data.purchasePrice } : {}),
+        ...(data.grossPotentialRent != null ? { grossPotentialRent: data.grossPotentialRent } : {}),
+        ...(data.vacancyRate != null ? { vacancyRate: data.vacancyRate } : {}),
+        ...(data.otherIncome != null ? { otherIncome: data.otherIncome } : {}),
+        ...(data.operatingExpenses != null ? { operatingExpenses: data.operatingExpenses } : {}),
+        ...(data.managementFeeRate != null ? { managementFeeRate: data.managementFeeRate } : {}),
+      }));
+      setExtractResults(prev => [...prev, { docType, ...data }]);
+  }
+
   async function handleDocUpload(file: File, docType: string) {
     setExtracting(docType);
     try {
@@ -185,20 +202,7 @@ export default function Underwriting() {
         const err = await res.json();
         throw new Error(err.message ?? "Extraction failed");
       }
-      const data = await res.json();
-      // Merge extracted data into calc
-      setCalc(prev => ({
-        ...prev,
-        ...(data.dealName && !prev.name ? { name: data.dealName } : {}),
-        ...(data.address && !prev.address ? { address: data.address } : {}),
-        ...(data.dealType ? { dealType: data.dealType } : {}),
-        ...(data.purchasePrice != null ? { purchasePrice: data.purchasePrice } : {}),
-        ...(data.grossPotentialRent != null ? { grossPotentialRent: data.grossPotentialRent } : {}),
-        ...(data.vacancyRate != null ? { vacancyRate: data.vacancyRate } : {}),
-        ...(data.otherIncome != null ? { otherIncome: data.otherIncome } : {}),
-        ...(data.operatingExpenses != null ? { operatingExpenses: data.operatingExpenses } : {}),
-      }));
-      setExtractResults(prev => [...prev, { docType, ...data }]);
+      applyExtracted(await res.json(), docType);
       toast({ title: `✓ ${docTypeLabel(docType)} extracted`, description: "Fields updated below. Review and adjust." });
     } catch (err: any) {
       toast({ title: "Extraction failed", description: err.message, variant: "destructive" });
@@ -208,7 +212,25 @@ export default function Underwriting() {
   }
 
   function docTypeLabel(dt: string) {
-    return dt === "om" ? "Offering Memorandum" : dt === "rentroll" ? "Rent Roll" : "P&L";
+    return dt === "om" ? "Offering Memorandum" : dt === "rentroll" ? "Rent Roll" : "Operating statement";
+  }
+
+  async function readDealFile(f: DealFile, docType: string) {
+    setExtracting(`file:${f.id}`);
+    try {
+      const res = await fetch(`/api/underwriting/${selected!.id}/from-file`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId: f.id, docType }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message ?? `Could not read the file (${res.status})`);
+      setEditMode(true);
+      applyExtracted(data, docType);
+      toast({ title: `Read ${f.name}`, description: "Figures filled in below. Check them against the document, then click Save." });
+    } catch (err: any) {
+      toast({ title: `Could not read ${f.name}`, description: err.message, variant: "destructive" });
+    } finally {
+      setExtracting(null);
+    }
   }
 
   if (isLoading) return <div className="flex items-center gap-2 text-muted-foreground h-32"><Loader2 className="animate-spin" size={16} /> Loading…</div>;
@@ -310,6 +332,11 @@ export default function Underwriting() {
 
               {returns && (calc.purchasePrice ?? 0) > 0 && (calc.grossPotentialRent ?? 0) > 0 && (
                 <MaxPriceCard model={calc as UnderwritingDeal} dealId={selected?.dealId ?? null} editing={editMode} />
+              )}
+
+              {selected?.dealId && (
+                <DealFilesPanel dealId={selected.dealId} busy={extracting} onRead={readDealFile}
+                  done={extractResults.map(r => r.fileName).filter(Boolean)} />
               )}
 
               {/* AI Document Upload Panel */}
@@ -602,6 +629,70 @@ export default function Underwriting() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ── Files saved to the linked Pipeline deal ─────────────────────────────────
+const READABLE = /\.(pdf|xlsx|docx|csv)$/i;
+function guessDocType(f: DealFile): string {
+  if (f.kind === "om" || /\b(om|offering|memorandum|brochure|package)\b/i.test(f.name)) return "om";
+  if (/rent\s*roll|\brr\b/i.test(f.name)) return "rentroll";
+  return "pl";
+}
+
+function DealFilesPanel({ dealId, busy, onRead, done }: {
+  dealId: number; busy: string | null; done: string[];
+  onRead: (f: DealFile, docType: string) => void;
+}) {
+  const { data: files = [] } = useQuery<DealFile[]>({ queryKey: ["/api/pipeline", dealId, "files"] });
+  const usable = files.filter(f => f.kind !== "loi" && READABLE.test(f.name));
+  const [types, setTypes] = useState<Record<number, string>>({});
+  const other = files.filter(f => f.kind !== "loi" && !READABLE.test(f.name));
+
+  return (
+    <Card>
+      <CardHeader className="pb-2 pt-3 px-4">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2"><FileText size={14} /> From the deal's files</CardTitle>
+      </CardHeader>
+      <CardContent className="px-4 pb-4 space-y-2">
+        {usable.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No readable files on this deal yet. Add operating statements, rent rolls or the OM in the deal's Files section on the Pipeline tab (PDF, Excel, Word or CSV).</p>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">Pick what each file is, then Fill in. Claude reads it and fills in the inputs below for you to check; nothing is saved until you click Save.</p>
+            <ul className="divide-y divide-border rounded-md border border-border">
+              {usable.map(f => {
+                const type = types[f.id] ?? guessDocType(f);
+                const reading = busy === `file:${f.id}`;
+                return (
+                  <li key={f.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                    <span className="text-sm text-foreground truncate flex-1 min-w-[160px]">
+                      {done.includes(f.name) && <CheckCircle2 size={12} className="inline text-green-600 mr-1 -mt-0.5" />}{f.name}
+                    </span>
+                    <Select value={type} onValueChange={v => setTypes(t => ({ ...t, [f.id]: v }))}>
+                      <SelectTrigger className="h-8 w-[170px] text-xs" aria-label={`What ${f.name} is`}><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="pl">Operating statement / T12</SelectItem>
+                        <SelectItem value="rentroll">Rent roll</SelectItem>
+                        <SelectItem value="om">Offering memorandum</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button size="sm" variant="outline" className="h-8 gap-1" disabled={busy !== null} onClick={() => onRead(f, type)}>
+                      {reading ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} {reading ? "Reading…" : "Fill in"}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+        {other.length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            Can't read: {other.map(f => f.name).join(", ")}.{other.some(f => /\.xls$/i.test(f.name)) ? " For .xls files, open in Excel and Save As .xlsx, then add that to the deal." : ""}
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

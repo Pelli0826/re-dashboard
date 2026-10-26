@@ -2,9 +2,9 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import crypto from "crypto";
-import mammoth from "mammoth";
+import { fileToText, TEXT_READABLE } from "./fileText";
 import { z } from "zod";
-import { extractFromPdf, type DocType } from "./extract";
+import { extractFromPdf, extractFromText, type DocType } from "./extract";
 import { buildDigest, sendDigest, digestStatus, clearDigestError } from "./digest";
 import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES, askAboutDeal, type AskTurn } from "./claude";
 import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting";
@@ -522,6 +522,34 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // Read a file already saved to the model's Pipeline deal (PDF, Excel, Word or CSV). Returns the
+  // extracted figures; the page fills them in for review and nothing is saved until the user clicks Save.
+  app.post("/api/underwriting/:id/from-file", async (req, res) => {
+    const model = storage.getUnderwritingDeal(Number(req.params.id));
+    if (!model) return res.status(404).json({ message: "Model not found" });
+    const parsed = z.object({ fileId: z.number().int(), docType: z.enum(["om", "rentroll", "pl"]) }).safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: readable(parsed.error) });
+    const f = storage.getDealFile(parsed.data.fileId);
+    if (!f || !model.dealId || f.dealId !== model.dealId) return res.status(404).json({ message: "That file isn't saved to this model's deal." });
+    if (!claudeConfigured()) return res.status(400).json({ message: "Set ANTHROPIC_API_KEY in Railway to enable document reading." });
+    let buffer: Buffer;
+    try { buffer = storage.readDealFile(f); } catch { return res.status(410).json({ message: "This file is missing from storage." }); }
+    try {
+      if (f.mime === "application/pdf") return res.json({ fileName: f.name, ...(await extractFromPdf(buffer, parsed.data.docType)) });
+      if (!TEXT_READABLE.test(f.name)) {
+        return res.status(400).json({ message: /\.xls$/i.test(f.name)
+          ? "Older .xls files can't be read. Open it in Excel, choose File → Save As → Excel Workbook (.xlsx), and add that to the deal."
+          : "Only PDF, Excel (.xlsx), Word (.docx) and CSV files can be read." });
+      }
+      const text = await fileToText(f.name, buffer);
+      if (!text) return res.status(400).json({ message: `${f.name} looks empty.` });
+      res.json({ fileName: f.name, ...(await extractFromText(f.name, text, parsed.data.docType)) });
+    } catch (err: any) {
+      console.error(`[underwriting] could not read file ${f.id}: ${err?.message}`);
+      res.status(500).json({ message: err?.message ?? "Could not read the file." });
+    }
+  });
+
   // ── OM intake: Claude reads the package, returns a prefilled deal + screening ──
   const omUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PDF_BYTES } });
   app.post("/api/intake/om", (req, res, next) => {
@@ -713,7 +741,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!parsed.success) return res.status(400).json({ message: readable(parsed.error) });
 
     // Newest files first, up to the per-request budget. PDFs are sent as documents;
-    // Word, CSV and text files are converted to text so Claude can read them too.
+    // Word, Excel, CSV and text files are converted to text so Claude can read them too.
     const pdfs: { name: string; data: Buffer }[] = [];
     const texts: { name: string; text: string }[] = [];
     const skipped: string[] = [];
@@ -726,11 +754,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           if (f.size > budget) { skipped.push(f.name); continue; }
           pdfs.push({ name: f.name, data: storage.readDealFile(f) });
           budget -= f.size;
-        } else if (/\.(docx|csv|txt|md)$/i.test(f.name)) {
-          let text = /\.docx$/i.test(f.name)
-            ? (await mammoth.extractRawText({ buffer: storage.readDealFile(f) })).value
-            : storage.readDealFile(f).toString("utf8");
-          text = text.trim();
+        } else if (TEXT_READABLE.test(f.name)) {
+          const text = await fileToText(f.name, storage.readDealFile(f));
           if (!text) { unreadable.push(f.name); continue; }
           if (text.length > textBudget) { skipped.push(f.name); continue; }
           texts.push({ name: f.name, text });

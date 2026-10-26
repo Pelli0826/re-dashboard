@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { PDFParse } from "pdf-parse";
 import { fromBuffer } from "pdf2pic";
-import { claudeConfigured, claudeJsonFromPdf } from "./claude";
+import { claudeConfigured, claudeJsonFromPdf, claudeJsonFromText } from "./claude";
 
 // Lazy init — only create client when a request actually comes in
 function getOpenAI() {
@@ -44,8 +44,10 @@ Return ONLY a valid JSON object with these fields (use null if not found, number
   "notes": string or null
 }`,
 
-  pl: `You are a real estate underwriting assistant analyzing a Profit & Loss or Operating Statement.
-Extract financial data from these pages. Annualize any monthly figures.
+  pl: `You are a real estate underwriting assistant analyzing a Profit & Loss or Operating Statement (often a trailing-12-month "T12").
+Extract financial data from this document. Use the most recent full 12 months (or the annual total column); annualize only if the statement covers less than a year.
+operatingExpenses is TOTAL operating expenses, excluding debt service, interest, depreciation, amortization and capital expenditures.
+managementFees is the management fee line if there is one (it may be included in operatingExpenses).
 
 Return ONLY a valid JSON object with these fields (use null if not found, numbers only — no $ signs or commas):
 {
@@ -55,7 +57,9 @@ Return ONLY a valid JSON object with these fields (use null if not found, number
   "effectiveGrossIncome": number or null,
   "operatingExpenses": number or null,
   "managementFees": number or null,
+  "managementFeesIncludedInOperatingExpenses": true | false | null,
   "noi": number or null,
+  "periodCovered": string or null,
   "notes": string or null
 }`,
 };
@@ -75,6 +79,7 @@ export interface ExtractedData {
   otherIncome?: number | null;
   operatingExpenses?: number | null;
   noi?: number | null;
+  managementFeeRate?: number | null;
   notes?: string | null;
 }
 
@@ -184,7 +189,19 @@ export async function extractFromPdf(buffer: Buffer, docType: DocType): Promise<
 
   }
 
-  // ── Normalize into underwriting fields ──────────────────────────────────
+  return normalize(docType, raw, method);
+}
+
+// Excel, Word or CSV already converted to text (Claude only).
+export async function extractFromText(name: string, text: string, docType: DocType): Promise<ExtractedData> {
+  const prompt = PROMPTS[docType];
+  if (!prompt) throw new Error("Unknown document type");
+  if (!claudeConfigured()) throw new Error("Set ANTHROPIC_API_KEY in Railway to read Excel and Word files.");
+  return normalize(docType, await claudeJsonFromText(name, text.slice(0, 400_000), prompt), "claude");
+}
+
+// ── Normalize into underwriting fields ──────────────────────────────────
+function normalize(docType: DocType, raw: Record<string, any>, method: ExtractedData["method"]): ExtractedData {
   const result: ExtractedData = { docType, raw, method };
 
   if (docType === "om") {
@@ -203,12 +220,17 @@ export async function extractFromPdf(buffer: Buffer, docType: DocType): Promise<
     result.vacancyRate = toNum(raw.vacancyRate);
     result.notes = raw.notes ?? `${raw.totalUnits ?? "?"} units, ${raw.occupiedUnits ?? "?"} occupied`;
   } else if (docType === "pl") {
-    result.grossPotentialRent = toNum(raw.grossPotentialRent) ?? toNum(raw.effectiveGrossIncome);
-    result.vacancyRate = raw.grossPotentialRent && raw.vacancyLoss
-      ? Math.round((raw.vacancyLoss / raw.grossPotentialRent) * 100 * 10) / 10
-      : null;
+    const gpr = toNum(raw.grossPotentialRent), egi = toNum(raw.effectiveGrossIncome), loss = toNum(raw.vacancyLoss);
+    result.grossPotentialRent = gpr ?? egi;
+    // Without a gross figure, the effective income already reflects vacancy: don't deduct it twice.
+    result.vacancyRate = gpr && loss ? Math.round((loss / gpr) * 1000) / 10 : !gpr && egi ? 0 : null;
     result.otherIncome = toNum(raw.otherIncome);
-    result.operatingExpenses = toNum(raw.operatingExpenses);
+    // The model adds its own management fee (a % of income), so take the statement's fee out of
+    // operating expenses and use it to set that %. Otherwise the fee would be counted twice.
+    const opex = toNum(raw.operatingExpenses), fee = toNum(raw.managementFees);
+    result.operatingExpenses = opex != null && fee != null && raw.managementFeesIncludedInOperatingExpenses !== false ? Math.max(0, opex - fee) : opex;
+    const income = (gpr ?? egi ?? 0) * (1 - (result.vacancyRate ?? 0) / 100) + (result.otherIncome ?? 0);
+    result.managementFeeRate = fee != null && income > 0 ? Math.round((fee / income) * 1000) / 10 : null;
     result.noi = toNum(raw.noi);
     result.notes = raw.notes ?? null;
   }

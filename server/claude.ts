@@ -226,6 +226,22 @@ export async function claudeJsonFromPdf(pdf: Buffer, prompt: string): Promise<Re
   return callClaude(pdf, prompt + "\n\nRespond with the JSON object only, no other text.", undefined, 1500);
 }
 
+// Same prompts for documents already converted to text (Excel, Word, CSV).
+export async function claudeJsonFromText(name: string, text: string, prompt: string): Promise<Record<string, any>> {
+  const data = await postMessages({
+    max_tokens: 1500,
+    messages: [{ role: "user", content: [
+      { type: "text", text: `File: ${name}\n\n${text}` },
+      { type: "text", text: prompt + "\n\nRespond with the JSON object only, no other text." },
+    ] }],
+  });
+  const out = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+  const json = out.replace(/```json|```/g, "").trim();
+  try { return JSON.parse(json || "{}"); } catch {
+    throw new Error("Claude's reply wasn't in the expected format. Try again.");
+  }
+}
+
 // ── Full OM intake: property facts + screening notes ─────────────────────
 const num = { type: ["number", "null"] };
 const str = { type: ["string", "null"] };

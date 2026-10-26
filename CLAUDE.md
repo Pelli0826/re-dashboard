@@ -37,7 +37,10 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `server/claude.ts`: Anthropic API calls (plain `fetch`, no SDK): OM intake, PDF auto-fill,
   Ask about this deal + `propose_changes` tool.
 - `server/digest.ts`: morning email (Resend HTTPS API) and its scheduler.
-- `server/extract.ts`: Underwriting page document auto-fill (Claude first, OpenAI fallback).
+- `server/extract.ts`: Underwriting document auto-fill (Claude first, OpenAI fallback), from a direct
+  upload or from a file saved to the linked deal (`POST /api/underwriting/:id/from-file`). Figures only
+  fill the form; nothing is saved until the user clicks Save. Operating-statement management fees are
+  taken out of operating expenses and set as the model's fee % (the proforma adds its own fee).
 - `shared/pipeline.ts`: stages, labels, alert rules, date helpers. Used by client AND server so
   the Pipeline page and the morning email always agree. Change rules here, not in two places.
 - `shared/underwriting.ts`: proforma, returns, IRR, max-price solver. Used by client and server.
@@ -158,7 +161,7 @@ There is no test suite. What has worked:
   `claude-sonnet-5-5`; to try one, set `ANTHROPIC_MODEL` in Railway and test OM upload and Ask
   on a real deal before making it the default in `server/claude.ts`.
 - `extract.ts` keeps an OpenAI fallback path that is unused when `ANTHROPIC_API_KEY` is set.
-- Excel files saved to deals can't be read by Ask about this deal (PDF, .docx, .csv, .txt only).
+- Old-format Excel (.xls) can't be read anywhere; .xlsx, .docx, .csv and PDF can (`server/fileText.ts`).
 - The footer "Created with Perplexity Computer" comes from `PerplexityAttribution.tsx` (the app
   was originally generated there). Leave it unless the owner asks.
 
