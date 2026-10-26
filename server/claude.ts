@@ -195,7 +195,8 @@ export async function askAboutDeal(opts: {
     ...opts.history.slice(-8).map(t => ({ role: t.role, content: t.content })),
     { role: "user", content: opts.question },
   ];
-  const data = await postMessages({ system: ASK_SYSTEM, max_tokens: 4096, messages, tools: [PROPOSE_TOOL] });
+  // Room for a full set of proposals from a long agreement (each action carries a cited reason).
+  const data = await postMessages({ system: ASK_SYSTEM, max_tokens: 16000, messages, tools: [PROPOSE_TOOL] });
   let text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
   const proposals = (data.content ?? [])
     .filter((b: any) => b.type === "tool_use" && b.name === "propose_changes")
@@ -210,7 +211,7 @@ export async function askAboutDeal(opts: {
       throw new Error("Claude declined to answer this question as worded. Try asking about specific terms, e.g. \"What are the deposit and due diligence terms in the agreement?\"");
     }
     if (stop === "max_tokens") {
-      throw new Error("Claude ran out of room before writing an answer. Ask a narrower question, e.g. one section of the agreement at a time.");
+      throw new Error("Claude ran out of room before finishing. Ask for less at once, e.g. \"Propose milestones from the PSA's zoning and approvals sections\", then ask for the rest.");
     }
     throw new Error(`Claude returned no text (reason: ${stop ?? "unknown"}). Try again; if it repeats, send this message to whoever maintains the dashboard.`);
   }
