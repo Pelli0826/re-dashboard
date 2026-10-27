@@ -12,7 +12,6 @@ import ARM from "./pages/ARM";
 import CashFlow from "./pages/CashFlow";
 import Contacts from "./pages/Contacts";
 import Investors from "./pages/Investors";
-import Documents from "./pages/Documents";
 import Tasks from "./pages/Tasks";
 import Login from "./pages/Login";
 import NotFound from "./pages/not-found";
@@ -47,7 +46,7 @@ function AppInner() {
           <Route path="/cashflow" component={CashFlow} />
           <Route path="/contacts" component={Contacts} />
           <Route path="/investors" component={Investors} />
-          <Route path="/documents" component={Documents} />
+          <Route path="/documents"><Redirect to="/projects" /></Route>
           <Route path="/tasks" component={Tasks} />
           {/* Underwriting lives in each deal now (Pipeline → deal → Underwriting tab). */}
           <Route path="/underwriting"><Redirect to="/pipeline" /></Route>

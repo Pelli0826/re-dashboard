@@ -36,6 +36,9 @@ GitHub, Resend or Anthropic's console as exact click paths.
   their deal. New deals open on the Underwriting tab. Unattached models are listed on the Pipeline page.
 - `client/src/components/ModelWorkspace.tsx`: one underwriting model (inputs, Fill in from deal
   files, returns, max price, proforma) and `DealUnderwriting` (a deal's models + Add scenario).
+- `client/src/components/ProjectDocuments.tsx`: a project's document links, shown inside its card on the
+  Projects page; links with no project show in "Company documents" below the cards. There is no separate
+  Documents page (decided 2026-10-27): `/documents` redirects to `/projects`.
 - `client/src/components/ConfirmDialog.tsx`: `useConfirm()`; every delete must go through it.
 - `server/routes.ts`: all API routes, auth, deal update logic, proposals, file and ask endpoints.
 - `server/storage.ts`: DB location, `CREATE TABLE IF NOT EXISTS` schema, migrations, storage methods.

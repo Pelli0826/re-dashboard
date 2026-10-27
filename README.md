@@ -1,7 +1,7 @@
 # RE Developer Dashboard
 
 A full-stack real estate developer dashboard:
-Overview, Projects, Pipeline (deal flow CRM), ARM Loans, Cash Flow, Investors, Contacts, Documents, Tasks, Underwriting.
+Overview, Projects, Pipeline (deal flow CRM), ARM Loans, Cash Flow, Investors, Contacts, Tasks. Underwriting lives inside each deal on the Pipeline; document links live inside each project.
 
 ## Tech stack
 - Frontend: React + Vite + Tailwind CSS + shadcn/ui

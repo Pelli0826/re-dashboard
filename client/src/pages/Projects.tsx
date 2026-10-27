@@ -6,6 +6,7 @@ import type { Project, InsertProject, PipelineDeal, DealMilestone, Task } from "
 import { PROJECT_STATUSES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import { STAGE_LABELS, type Stage } from "@shared/pipeline";
 import { OPEN_DEAL_KEY } from "./Pipeline";
+import { ProjectDocuments } from "@/components/ProjectDocuments";
 import { useLocation } from "wouter";
 import { insertProjectSchema } from "@shared/schema";
 import { useForm } from "react-hook-form";
@@ -241,12 +242,21 @@ export default function Projects() {
                   </div>
                 </div>
                 {deal && <FromDeal deal={deal} milestones={milestones} tasks={tasks} />}
+                <ProjectDocuments projectId={p.id} projects={projects} />
                 {p.notes && <p className="text-xs text-muted-foreground italic">{p.notes}</p>}
               </CardContent>
             </Card>
           );
         })}
       </div>
+
+      <Card className="max-w-xl" data-testid="card-company-documents">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold">Company documents</CardTitle>
+          <p className="text-xs text-muted-foreground">Links that aren't tied to one project.</p>
+        </CardHeader>
+        <CardContent><ProjectDocuments projectId={null} projects={projects} /></CardContent>
+      </Card>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
