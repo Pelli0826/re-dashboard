@@ -78,8 +78,8 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `npm run dev`: local dev server at http://localhost:5000. No password needed locally.
 - `npm run check`: TypeScript. `npm run build`: production build to `dist/`.
 - `npm start`: run the production build (`NODE_ENV=production`).
-- Do NOT use `npm run db:push` (drizzle-kit). Tables are created and migrated by raw SQL in
-  `server/storage.ts`; see Database below.
+- There is no drizzle-kit / `db:push` (removed 2026-10-27). Tables are created and migrated by raw
+  SQL in `server/storage.ts`; see Database below.
 
 ## Deploy
 
