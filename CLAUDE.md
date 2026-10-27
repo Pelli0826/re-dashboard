@@ -49,6 +49,13 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `shared/pipeline.ts`: stages, labels, alert rules, date helpers. Used by client AND server so
   the Pipeline page and the morning email always agree. Change rules here, not in two places.
 - `shared/underwriting.ts`: proforma, returns, IRR, max-price solver. Used by client and server.
+- `shared/valueAdd.ts`: value-add / rehab plan (partly vacant property: vacant units renovated on a
+  schedule, occupied units renovated on turnover), run month by month with lender holdback, optional
+  refinance and sale; plus its max-price solver. Stored as JSON in `underwriting.value_add`; when the
+  plan is on it replaces the stabilized proforma on the Underwriting tab. Verified against a hand-worked
+  timeline, an independent Python implementation (cash flows match to the cent, IRR by bisection), and
+  the stabilized model (identical yearly NOI when nothing is renovated). Re-run those checks after
+  changing the engine.
 - `shared/loi.ts`: LOI terms, defaults from a deal, section wording, numbers in words (code, not
   the model). `server/loi.ts` renders it to Word with the `docx` package;
   `client/src/components/LoiDialog.tsx` is the form ("Draft LOI" in the deal panel). Terms are

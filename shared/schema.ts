@@ -290,6 +290,7 @@ export const underwriting = sqliteTable("underwriting", {
   preferredReturn: real("preferred_return").notNull().default(8), // % pref to LP
 
   notes: text("notes"),
+  valueAdd: text("value_add"),                       // JSON ValueAddPlan (shared/valueAdd.ts); null = stabilized model
 });
 
 export const insertUnderwritingSchema = createInsertSchema(underwriting).omit({ id: true });

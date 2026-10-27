@@ -4,6 +4,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { UnderwritingDeal, PipelineDeal, DealFile } from "@shared/schema";
 import { buildProforma, calcReturns, maxPriceForIrr, priceSensitivity, type LoanMode } from "@shared/underwriting";
+import { parsePlan, runValueAdd, vaMaxPriceForIrr, vaPriceSensitivity, type ValueAddPlan, type VaResult } from "@shared/valueAdd";
+import { Switch } from "@/components/ui/switch";
 import { insertUnderwritingSchema } from "@shared/schema";
 import { z } from "zod";
 import {
@@ -132,6 +134,12 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
     setCalc(prev => ({ ...prev, [field]: value }));
   }, []);
 
+  // Value-add / rehab plan (stored as JSON on the model). When on, it replaces the stabilized proforma.
+  const plan = useMemo(() => parsePlan(calc.valueAdd), [calc.valueAdd]);
+  const va = useMemo(() => plan.enabled && plan.totalUnits > 0 ? runValueAdd(calc as UnderwritingDeal, plan) : null, [calc, plan]);
+  const setPlan = (k: keyof ValueAddPlan, v: number | boolean) =>
+    setCalc(prev => ({ ...prev, valueAdd: JSON.stringify({ ...parsePlan(prev.valueAdd), [k]: v }) }));
+
   // Merge figures read from a document into the inputs. Nothing is saved until the user clicks Save.
   function applyExtracted(data: Record<string, any>, docType: string) {
       setCalc(prev => ({
@@ -145,6 +153,12 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
         ...(data.otherIncome != null ? { otherIncome: data.otherIncome } : {}),
         ...(data.operatingExpenses != null ? { operatingExpenses: data.operatingExpenses } : {}),
         ...(data.managementFeeRate != null ? { managementFeeRate: data.managementFeeRate } : {}),
+        ...(docType === "rentroll" && data.raw ? { valueAdd: JSON.stringify({
+          ...parsePlan(prev.valueAdd),
+          ...(data.raw.totalUnits > 0 ? { totalUnits: Math.round(data.raw.totalUnits) } : {}),
+          ...(data.raw.occupiedUnits >= 0 && data.raw.occupiedUnits != null ? { occupiedUnits: Math.round(data.raw.occupiedUnits) } : {}),
+          ...(data.raw.averageRentPerUnit > 0 ? { inPlaceRent: Math.round(data.raw.averageRentPerUnit) } : {}),
+        }) } : {}),
       }));
       setExtractResults(prev => [...prev, { docType, ...data }]);
   }
@@ -226,7 +240,8 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
               </div>
 
               {/* Output metrics */}
-              {returns && (
+              {va && <VaMetrics r={va} plan={plan} />}
+              {!va && returns && (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
                   <MetricCard label="Year 1 Cap Rate" value={fmtPct(returns.yr1CapRate)} good={returns.yr1CapRate >= 5} warn={returns.yr1CapRate < 4} />
                   <MetricCard label="Cash-on-Cash" value={fmtPct(returns.yr1CoC)} good={returns.yr1CoC >= 8} warn={returns.yr1CoC < 5} />
@@ -237,8 +252,8 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                 </div>
               )}
 
-              {returns && (calc.purchasePrice ?? 0) > 0 && (calc.grossPotentialRent ?? 0) > 0 && (
-                <MaxPriceCard model={calc as UnderwritingDeal} dealId={selected?.dealId ?? null} editing={editMode} />
+              {(calc.purchasePrice ?? 0) > 0 && (va || (returns && (calc.grossPotentialRent ?? 0) > 0)) && (
+                <MaxPriceCard model={calc as UnderwritingDeal} plan={va ? plan : null} dealId={selected?.dealId ?? null} editing={editMode} />
               )}
 
               {selected?.dealId && (
@@ -308,6 +323,7 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
               )}
 
               {/* Inputs */}
+              {editMode && <ValueAddInputs plan={plan} setPlan={setPlan} />}
               {editMode && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {/* Acquisition */}
@@ -340,12 +356,13 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                       </div>
                       <NumInput label="Purchase Price" value={calc.purchasePrice} onChange={v => updateCalc("purchasePrice", v)} prefix="$" />
                       <NumInput label="Closing Costs" value={calc.closingCosts} onChange={v => updateCalc("closingCosts", v)} suffix="%" help="% of purchase price" />
-                      <NumInput label="Renovation / CapEx Budget" value={calc.renovationBudget} onChange={v => updateCalc("renovationBudget", v)} prefix="$" />
+                      <NumInput label={plan.enabled ? "Exterior / Common Area Budget" : "Renovation / CapEx Budget"} value={calc.renovationBudget} onChange={v => updateCalc("renovationBudget", v)} prefix="$" />
                       <NumInput label="Total Equity Invested" value={calc.equityIn} onChange={v => updateCalc("equityIn", v)} prefix="$" help="Leave 0 to auto-calc (price + costs − loan)" />
                     </CardContent>
                   </Card>
 
-                  {/* Income */}
+                  {/* Income (not used by a value-add plan: income comes from units and rents) */}
+                  {!plan.enabled && (
                   <Card>
                     <CardHeader className="pb-2 pt-3 px-4">
                       <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Income (Year 1 Annual)</CardTitle>
@@ -356,6 +373,7 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                       <NumInput label="Other Income" value={calc.otherIncome} onChange={v => updateCalc("otherIncome", v)} prefix="$" help="Parking, laundry, fees" />
                     </CardContent>
                   </Card>
+                  )}
 
                   {/* Expenses */}
                   <Card>
@@ -413,8 +431,10 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                 </div>
               )}
 
+              {va && <VaTable r={va} />}
+
               {/* Proforma table */}
-              {proforma.length > 0 && (
+              {!va && proforma.length > 0 && (
                 <Card>
                   <CardHeader className="pb-2 pt-3 px-4">
                     <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -469,6 +489,16 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                   </CardHeader>
                   <CardContent className="px-4 pb-4">
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-8 gap-y-2 text-sm">
+                      {va ? <>
+                      <SummaryRow label="Initial equity" value={fmt$(va.initialEquity)} />
+                      <SummaryRow label="Peak equity" value={fmt$(va.peakEquity)} />
+                      <SummaryRow label="Renovation spend" value={fmt$(va.totalRenoSpend)} />
+                      <SummaryRow label="Units renovated" value={Math.round(va.unitsRenovated).toLocaleString()} />
+                      <SummaryRow label="Refinance loan" value={va.refiLoan ? fmt$(va.refiLoan) : "None"} />
+                      <SummaryRow label="Exit value" value={fmt$(va.exitValue)} />
+                      <SummaryRow label="Net sale proceeds" value={fmt$(va.netSale)} />
+                      <SummaryRow label="Total distributions" value={fmt$(va.totalDistributions)} />
+                      </> : <>
                       <SummaryRow label="Total Project Cost" value={fmt$(returns.totalCost)} />
                       <SummaryRow label="Total Equity" value={fmt$(returns.equity)} />
                       <SummaryRow label="Loan Amount" value={fmt$(calc.loanAmount)} />
@@ -477,6 +507,7 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                       <SummaryRow label="Net Exit Proceeds" value={fmt$(returns.netExitProceeds)} />
                       <SummaryRow label="Total Distributions" value={fmt$(proforma.reduce((s, r) => s + r.cashFlow, 0))} />
                       <SummaryRow label="Preferred Return" value={fmtPct(calc.preferredReturn)} />
+                      </>}
                     </div>
                     {calc.notes !== undefined && (
                       <div className="mt-3">
@@ -491,6 +522,134 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
                 </Card>
               )}
             </div>
+  );
+}
+
+// ─── Value-add / rehab plan ────────────────────────────────────────────────
+function ValueAddInputs({ plan, setPlan }: { plan: ValueAddPlan; setPlan: (k: keyof ValueAddPlan, v: number | boolean) => void }) {
+  const N = (k: keyof ValueAddPlan, label: string, o: { prefix?: string; suffix?: string; help?: string; int?: boolean } = {}) => (
+    <NumInput label={label} value={plan[k] as number} prefix={o.prefix} suffix={o.suffix} help={o.help}
+      onChange={v => setPlan(k, o.int ? Math.max(0, Math.round(v)) : v)} />
+  );
+  const vacant = Math.max(0, plan.totalUnits - plan.occupiedUnits);
+  return (
+    <Card>
+      <CardHeader className="pb-2 pt-3 px-4">
+        <label className="flex items-center gap-3">
+          <Switch checked={plan.enabled} onCheckedChange={v => setPlan("enabled", v)} aria-label="Use a value-add plan" />
+          <span>
+            <span className="text-sm font-semibold text-foreground block">Value-add / rehab plan</span>
+            <span className="text-xs text-muted-foreground">For partly vacant properties: renovate vacant units on a schedule and occupied units as tenants move out. Runs month by month.</span>
+          </span>
+        </label>
+      </CardHeader>
+      {plan.enabled && (
+        <CardContent className="px-4 pb-4 space-y-4">
+          <p className="text-xs text-muted-foreground">
+            Income comes from the units and rents here (the Income inputs below are hidden). The loan below is the acquisition loan;
+            the lender can fund part of the renovation, and you can refinance once rents are up.
+          </p>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Units and rents</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              {N("totalUnits", "Total units", { int: true })}
+              {N("occupiedUnits", "Occupied at purchase", { int: true, help: plan.totalUnits > 0 ? `${Math.round(plan.occupiedUnits / plan.totalUnits * 100)}% occupied, ${vacant} vacant` : "From the rent roll" })}
+              {N("inPlaceRent", "In-place rent", { prefix: "$", help: "Per unit per month, current tenants" })}
+              {N("renovatedRent", "Renovated rent", { prefix: "$", help: "Per unit per month, today's dollars" })}
+              {N("otherIncomePerUnit", "Other income", { prefix: "$", help: "Per occupied unit per month" })}
+              {N("collectionLoss", "Collection loss", { suffix: "%", help: "Concessions and bad debt" })}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Renovation program</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+              {N("renoCostPerUnit", "Cost per unit", { prefix: "$" })}
+              {N("renoMonths", "Months offline", { int: true, help: "Per unit while renovated" })}
+              {N("vacantStartMonth", "Vacant units start", { int: true, help: "Month 1 = first month owned" })}
+              {N("renoPace", "Units started / month", { help: "Crew capacity" })}
+              {N("leaseUpPace", "Units leased / month", { help: "Renovated vacant units" })}
+              {N("turnoverRate", "Turnover", { suffix: "%/yr", help: "Occupied units moving out; each is renovated" })}
+              {N("turnDowntime", "Vacant on turn", { suffix: "mo", help: "When a renovated unit's tenant leaves" })}
+              {N("commonAreaMonths", "Common areas over", { suffix: "mo", int: true, help: "Spreads the exterior / common area budget" })}
+              {N("holdbackPct", "Lender funds", { suffix: "%", help: "Of renovation spending, added to the loan" })}
+              {N("stabilizedOccupancy", "Stabilized at", { suffix: "%", help: "Occupancy, once vacant units are done" })}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Refinance (optional)</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              {N("refiMonth", "In month", { int: true, help: "0 = no refinance" })}
+              {N("refiLtv", "Loan to value", { suffix: "%" })}
+              {N("refiCapRate", "Valued at cap rate", { suffix: "%", help: "On that month's NOI, annualized" })}
+              {N("refiRate", "Interest rate", { suffix: "%" })}
+              {N("refiAmortYears", "Amortization", { suffix: "yrs", int: true })}
+              {N("refiCostPct", "Costs", { suffix: "%", help: "Of the new loan" })}
+            </div>
+          </div>
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
+function VaMetrics({ r, plan }: { r: VaResult; plan: ValueAddPlan }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+      <MetricCard label="IRR" value={fmtPct(r.irr)} good={r.irr >= 15} warn={r.irr < 10} sub="levered, monthly cash flows" />
+      <MetricCard label="Equity Multiple" value={fmtX(r.equityMultiple)} good={r.equityMultiple >= 2} warn={r.equityMultiple < 1.5} />
+      <MetricCard label="Peak Equity" value={fmt$(r.peakEquity)} sub={`${fmt$(r.initialEquity)} at closing`} />
+      <MetricCard label="Stabilized" value={r.stabilizedMonth ? `Month ${r.stabilizedMonth}` : "Not reached"} sub={`${plan.stabilizedOccupancy}% occupied, vacant units done`} warn={!r.stabilizedMonth} />
+      <MetricCard label="Yield on Cost" value={fmtPct(r.yieldOnCost)} sub="stabilized NOI / all-in cost" />
+      {plan.refiMonth > 0
+        ? <MetricCard label="Refi Cash-Out" value={fmt$(r.refiCashOut)} sub={`month ${plan.refiMonth}, loan ${fmt$(r.refiLoan)}`} warn={r.refiCashOut < 0} />
+        : <MetricCard label="Exit Value" value={fmt$(r.exitValue)} sub="trailing 12 months' NOI" />}
+    </div>
+  );
+}
+
+function VaTable({ r }: { r: VaResult }) {
+  const paren = (v: number) => v ? `(${fmt$(v)})` : "—";
+  const rows: { label: string; get: (y: VaResult["years"][number]) => string; bold?: boolean; cls?: string }[] = [
+    { label: "Avg. occupancy", get: y => fmtPct(y.avgOccupancy, 0), cls: "text-muted-foreground" },
+    { label: "Renovated (year end)", get: y => fmtPct(y.renovatedPct, 0), cls: "text-muted-foreground" },
+    { label: "Rental income", get: y => fmt$(y.rentIncome) },
+    { label: "Other income", get: y => fmt$(y.otherIncome) },
+    { label: "Operating expenses", get: y => paren(y.opex), cls: "text-red-500" },
+    { label: "Management fee", get: y => paren(y.mgmtFee), cls: "text-red-500" },
+    { label: "CapEx reserve", get: y => paren(y.reserve), cls: "text-red-500" },
+    { label: "NOI", get: y => fmt$(y.noi), bold: true, cls: "text-green-600 dark:text-green-400" },
+    { label: "Renovation spend", get: y => paren(y.renoSpend), cls: "text-orange-500" },
+    { label: "Lender draws", get: y => y.draws ? fmt$(y.draws) : "—" },
+    { label: "Debt service", get: y => paren(y.debtService), cls: "text-orange-500" },
+    { label: "Refinance proceeds", get: y => y.refiProceeds ? fmt$(y.refiProceeds) : "—" },
+    { label: "Sale proceeds", get: y => y.saleProceeds ? fmt$(y.saleProceeds) : "—" },
+    { label: "Cash flow to equity", get: y => y.cashFlow < 0 ? `(${fmt$(-y.cashFlow)})` : fmt$(y.cashFlow), bold: true },
+  ];
+  return (
+    <Card>
+      <CardHeader className="pb-2 pt-3 px-4">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2"><BarChart3 size={15} /> Value-add plan by year</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0 overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-border bg-muted/30">
+              <th className="text-left px-4 py-2 font-medium text-muted-foreground w-40">Line item</th>
+              {r.years.map(y => <th key={y.year} className="text-right px-3 py-2 font-medium text-muted-foreground">Year {y.year}</th>)}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {rows.map(row => (
+              <tr key={row.label} className="hover:bg-muted/20">
+                <td className={`px-4 py-1.5 ${row.bold ? "font-semibold text-foreground" : "text-muted-foreground"}`}>{row.label}</td>
+                {r.years.map(y => <td key={y.year} className={`px-3 py-1.5 text-right font-mono ${row.cls ?? (row.bold ? "font-semibold text-foreground" : "text-foreground")}`}>{row.get(y)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="text-xs text-muted-foreground px-4 py-2">Negative cash flow to equity means money you put in (renovation not funded by the lender, carrying costs). The sale is valued on the last 12 months' NOI at the exit cap rate.</p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -634,14 +793,14 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
 }
 
 // ── Maximum price for a target IRR ──────────────────────────────────────────
-function MaxPriceCard({ model, dealId, editing }: { model: UnderwritingDeal; dealId: number | null; editing: boolean }) {
+function MaxPriceCard({ model, plan, dealId, editing }: { model: UnderwritingDeal; plan: ValueAddPlan | null; dealId: number | null; editing: boolean }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [target, setTarget] = useState("15");
   const [mode, setMode] = useState<LoanMode>("ltv");
   const t = parseFloat(target);
-  const maxPrice = useMemo(() => (isFinite(t) ? maxPriceForIrr(model, t, mode) : null), [model, t, mode]);
-  const rows = useMemo(() => priceSensitivity(model, mode), [model, mode]);
+  const maxPrice = useMemo(() => (!isFinite(t) ? null : plan ? vaMaxPriceForIrr(model, plan, t, mode) : maxPriceForIrr(model, t, mode)), [model, plan, t, mode]);
+  const rows = useMemo(() => plan ? vaPriceSensitivity(model, plan, mode) : priceSensitivity(model, mode), [model, plan, mode]);
   const ltv = model.purchasePrice > 0 ? (model.loanAmount / model.purchasePrice) * 100 : 0;
   const { data: deal } = useQuery<PipelineDeal>({ queryKey: ["/api/pipeline", dealId ?? 0], enabled: !!dealId });
 
@@ -705,8 +864,8 @@ function MaxPriceCard({ model, dealId, editing }: { model: UnderwritingDeal; dea
                 <th className="text-right py-1.5 font-medium">vs. current</th>
                 <th className="text-right py-1.5 font-medium">IRR</th>
                 <th className="text-right py-1.5 font-medium">Equity multiple</th>
-                <th className="text-right py-1.5 font-medium">Yr 1 cash-on-cash</th>
-                <th className="text-right py-1.5 font-medium">Yr 1 DSCR</th>
+                <th className="text-right py-1.5 font-medium">{plan ? "Peak equity" : "Yr 1 cash-on-cash"}</th>
+                <th className="text-right py-1.5 font-medium">{plan ? "Yield on cost" : "Yr 1 DSCR"}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -716,14 +875,19 @@ function MaxPriceCard({ model, dealId, editing }: { model: UnderwritingDeal; dea
                   <td className="py-1.5 text-right text-muted-foreground">{r.pct === 0 ? "current" : `${r.pct > 0 ? "+" : ""}${r.pct}%`}</td>
                   <td className={`py-1.5 text-right font-mono ${isFinite(t) && r.irr >= t ? "text-green-700 dark:text-green-400" : ""}`}>{fmtPct(r.irr, 1)}</td>
                   <td className="py-1.5 text-right font-mono">{fmtX(r.equityMultiple)}</td>
-                  <td className="py-1.5 text-right font-mono">{fmtPct(r.yr1CoC, 1)}</td>
-                  <td className="py-1.5 text-right font-mono">{r.loanAmount > 0 ? `${r.yr1Dscr.toFixed(2)}x` : "—"}</td>
+                  {"peakEquity" in r ? <>
+                    <td className="py-1.5 text-right font-mono">{fmt$(r.peakEquity)}</td>
+                    <td className="py-1.5 text-right font-mono">{fmtPct(r.yieldOnCost, 1)}</td>
+                  </> : <>
+                    <td className="py-1.5 text-right font-mono">{fmtPct(r.yr1CoC, 1)}</td>
+                    <td className="py-1.5 text-right font-mono">{r.loanAmount > 0 ? `${r.yr1Dscr.toFixed(2)}x` : "—"}</td>
+                  </>}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p className="text-xs text-muted-foreground">Equity is recalculated at each price as total cost minus the loan. Rents, expenses and exit cap rate stay as entered.</p>
+        <p className="text-xs text-muted-foreground">Equity is recalculated at each price as total cost minus the loan. {plan ? "The renovation plan, rents, expenses and exit cap rate" : "Rents, expenses and exit cap rate"} stay as entered.</p>
       </CardContent>
     </Card>
   );

@@ -31,7 +31,7 @@ Return ONLY a valid JSON object with these fields (use null if not found, number
 }`,
 
   rentroll: `You are a real estate underwriting assistant analyzing a Rent Roll.
-Extract rental income data from these pages.
+Extract rental income data from these pages. Count every unit, including vacant, down, model and employee units, in totalUnits; occupiedUnits counts units with a current lease. grossPotentialRent is annual.
 
 Return ONLY a valid JSON object with these fields (use null if not found, numbers only — no $ signs or commas):
 {
@@ -40,7 +40,7 @@ Return ONLY a valid JSON object with these fields (use null if not found, number
   "vacancyRate": number or null,
   "grossPotentialRent": number or null,
   "currentActualRent": number or null,
-  "averageRentPerUnit": number or null,
+  "averageRentPerUnit": number or null,   // average MONTHLY rent per occupied unit (current leases)
   "notes": string or null
 }`,
 

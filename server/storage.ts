@@ -141,7 +141,7 @@ sqlite.exec(`
     io_years INTEGER NOT NULL DEFAULT 0, hold_years INTEGER NOT NULL DEFAULT 5,
     rent_growth_rate REAL NOT NULL DEFAULT 3, expense_growth_rate REAL NOT NULL DEFAULT 2,
     exit_cap_rate REAL NOT NULL DEFAULT 5.5, selling_costs REAL NOT NULL DEFAULT 2,
-    preferred_return REAL NOT NULL DEFAULT 8, notes TEXT
+    preferred_return REAL NOT NULL DEFAULT 8, notes TEXT, value_add TEXT
   );
 `);
 
@@ -178,6 +178,7 @@ function addColumnIfMissing(table: string, column: string, ddl: string) {
 addColumnIfMissing("tasks", "deal_id", "deal_id INTEGER");
 addColumnIfMissing("underwriting", "deal_id", "deal_id INTEGER");
 addColumnIfMissing("projects", "deal_id", "deal_id INTEGER");
+addColumnIfMissing("underwriting", "value_add", "value_add TEXT");
 
 // Link models created from an OM before linking existed (named "D-2026-001 …").
 {
