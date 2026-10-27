@@ -16,9 +16,11 @@ import {
   ACTIVE_STAGES, STAGE_LABELS, dealAlerts, milestoneAlerts, daysUntil, type Stage,
 } from "@shared/pipeline";
 import type { PipelineDeal, Task } from "@shared/schema";
+import { boxConfig, lastBoxRun } from "./box";
 
 const LAST_SENT_KEY = "digest:lastSentDate";
 const LAST_ERROR_KEY = "digest:lastError";
+const LAST_SENT_AT_KEY = "digest:lastSentAt"; // ISO time of the last scheduled email, for "New from Box"
 
 export function digestConfig() {
   const to = (process.env.DIGEST_TO ?? "").split(",").map(s => s.trim()).filter(Boolean);
@@ -36,7 +38,7 @@ export function digestConfig() {
 }
 
 // Current date/hour/weekday in the digest's timezone.
-function localNow(tz: string, at = new Date()) {
+export function localNow(tz: string, at = new Date()) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
     timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23", weekday: "short",
   }).formatToParts(at).map(p => [p.type, p.value]));
@@ -85,6 +87,18 @@ export function buildDigest(at = new Date()): Digest {
   const newDeals = deals.filter(d => (Date.now() - new Date(d.createdAt).getTime()) < 86_400_000 * (localNow(cfg.tz, at).weekday === "Mon" ? 3 : 1));
   const byStage = ACTIVE_STAGES.map(s => ({ s, n: active.filter(d => d.stage === s).length })).filter(x => x.n);
 
+  // Box import: deals created and files that failed or were skipped since the last email
+  // (or the last day, three on Mondays, before the first one).
+  const since = getState(LAST_SENT_AT_KEY)
+    || new Date(at.getTime() - 86_400_000 * (localNow(cfg.tz, at).weekday === "Mon" ? 3 : 1)).toISOString();
+  const boxRows = storage.getBoxFiles().filter(f => f.processedAt > since).reverse();
+  const boxDeals = boxRows.filter(f => f.status === "processed").map(f => ({ f, d: f.dealId ? dealById.get(f.dealId) : undefined }));
+  const boxProblems = boxRows.filter(f => f.status !== "processed");
+  const run = lastBoxRun();
+  const boxRunError = run?.error && (run.finishedAt ?? run.startedAt) > since ? run.error : null;
+  const boxWaiting = run && !run.error && (run.finishedAt ?? "") > since ? run.waiting : 0;
+  const showBox = boxConfig().configured || boxRows.length > 0;
+
   const urgentCount = deadlines.length + taskRows.filter(x => x.due != null && x.due <= 0).length;
   const subject = urgentCount
     ? `${urgentCount} item${urgentCount === 1 ? "" : "s"} need attention today: ${longDate(ymd)}`
@@ -104,6 +118,15 @@ export function buildDigest(at = new Date()): Digest {
   section("Tasks", taskRows.map(({ t, due, remind }) =>
     `${t.title}${taskContext(t) ? ` [${taskContext(t)}]` : ""}: ${due != null && due <= 0 ? (due === 0 ? "due today" : `${-due} days overdue`) : remind ? "reminder today" : ""}`));
   section("Follow up", followUps.map(a => `${dealLine(a.deal)}: ${a.text}`));
+  if (showBox) {
+    const boxLines = [
+      ...(boxRunError ? [`The last Box check failed: ${boxRunError}`] : []),
+      ...boxDeals.map(({ f, d }) => d ? `${d.name} (${d.dealCode}) from ${f.name}. Needs review.` : `${f.name}: deal created, since deleted.`),
+      ...boxProblems.map(f => `${f.name}: ${f.status === "failed" ? "failed" : "skipped"}. ${f.error ?? ""}`.trim()),
+      ...(boxWaiting ? [`${boxWaiting} more PDF${boxWaiting === 1 ? "" : "s"} waiting for the next run (daily limit).`] : []),
+    ];
+    section("New from Box", boxLines.length ? boxLines : ["No new files in the Deals Inbox."]);
+  }
   if (!deadlines.length && !taskRows.length && !followUps.length) lines.push("No deadlines, overdue tasks or quiet deals today.", "");
   lines.push(`Pipeline: ${active.length} active deal${active.length === 1 ? "" : "s"}${byStage.length ? ` (${byStage.map(x => `${x.n} ${STAGE_LABELS[x.s]}`).join(", ")})` : ""}.`);
   if (newDeals.length) lines.push(`New: ${newDeals.map(d => d.name).join(", ")}.`);
@@ -128,6 +151,13 @@ export function buildDigest(at = new Date()): Digest {
   <p style="margin:4px 0 0;font-size:14px;color:#374151">${urgentCount ? `${urgentCount} item${urgentCount === 1 ? "" : "s"} need attention today.` : "Nothing urgent today."}</p>
   ${block("Deal deadlines", deadlines.map(a => `<tr><td ${td}>${link("/pipeline", a.deal.name)}<br><span style="font-size:12px;color:#6b7280">${esc(a.deal.dealCode)}, ${esc(STAGE_LABELS[a.deal.stage as Stage])}${a.deal.offerPrice || a.deal.askingPrice ? `, ${money(a.deal.offerPrice ?? a.deal.askingPrice)}` : ""}</span></td><td ${td} align="right">${esc(a.deadline!.label)}<br>${tag(whenLabel(a.deadline!.days), a.deadline!.days <= 0 ? "red" : "amber")}</td></tr>`))}
   ${block("Tasks", taskRows.map(({ t, due, remind }) => `<tr><td ${td}>${link("/tasks", t.title)}${taskContext(t) ? `<br><span style="font-size:12px;color:#6b7280">${esc(taskContext(t))}</span>` : ""}</td><td ${td} align="right">${due != null && due <= 0 ? tag(due === 0 ? "due today" : `${-due}d overdue`, due < 0 ? "red" : "amber") : remind ? tag("reminder", "gray") : ""}</td></tr>`))}
+  ${showBox ? block("New from Box", [
+    ...(boxRunError ? [`<tr><td ${td} colspan="2"><span style="color:#b91c1c">The last Box check failed:</span> ${esc(boxRunError)}</td></tr>`] : []),
+    ...boxDeals.map(({ f, d }) => `<tr><td ${td}>${d ? link("/pipeline", d.name) : esc(f.name)}<br><span style="font-size:12px;color:#6b7280">${d ? `${esc(d.dealCode)}, from ${esc(f.name)}` : "Deal created, since deleted"}</span></td><td ${td} align="right">${d ? tag("needs review", "amber") : ""}</td></tr>`),
+    ...boxProblems.map(f => `<tr><td ${td}>${esc(f.name)}<br><span style="font-size:12px;color:#6b7280">${esc(f.error ?? "")}</span></td><td ${td} align="right">${tag(f.status === "failed" ? "failed" : "skipped", f.status === "failed" ? "red" : "gray")}</td></tr>`),
+    ...(boxWaiting ? [`<tr><td ${td} colspan="2">${boxWaiting} more PDF${boxWaiting === 1 ? "" : "s"} waiting for the next run (daily limit).</td></tr>`] : []),
+    ...(!boxRunError && !boxRows.length && !boxWaiting ? [`<tr><td ${td} colspan="2">No new files in the Deals Inbox.</td></tr>`] : []),
+  ]) : ""}
   ${block("Follow up", followUps.map(a => `<tr><td ${td}>${link("/pipeline", a.deal.name)}<br><span style="font-size:12px;color:#6b7280">${esc(a.text)}</span></td><td ${td} align="right">${tag(STAGE_LABELS[a.deal.stage as Stage], "gray")}</td></tr>`))}
   ${!deadlines.length && !taskRows.length && !followUps.length ? `<p style="font-size:14px;color:#374151;margin:24px 0 0">No deadlines, overdue tasks or quiet deals today.</p>` : ""}
   <div style="margin-top:24px;padding:12px 16px;background:#f3f4f6;border-radius:8px;font-size:13px;color:#374151">
@@ -193,9 +223,11 @@ export function startDigestScheduler() {
     if (now.hour < cfg.hour || now.hour >= Math.max(cfg.hour + 1, 12)) return;
     if (getState(LAST_SENT_KEY) === now.ymd) return;
     setState(LAST_SENT_KEY, now.ymd); // claim today first so a slow send can't double up
+    const builtAt = new Date().toISOString(); // a Box file imported while sending goes in tomorrow's email
     try {
       const r = await sendDigest();
       setState(LAST_ERROR_KEY, "");
+      setState(LAST_SENT_AT_KEY, builtAt);
       console.log(`[digest] sent for ${now.ymd} to ${r.to.length} recipient(s)`);
     } catch (err: any) {
       setState(LAST_SENT_KEY, ""); // retry on the next check (the idempotency key prevents duplicates)

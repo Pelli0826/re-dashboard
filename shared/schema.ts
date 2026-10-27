@@ -84,10 +84,12 @@ export const pipeline = sqliteTable("deals", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   notes: text("notes"),
+  needsReview: integer("needs_review").notNull().default(0), // 1 = created automatically (Box import), figures not yet checked
 });
 
 export const insertPipelineSchema = createInsertSchema(pipeline).omit({
   id: true, dealCode: true, stageChangedAt: true, lastActivityAt: true, createdAt: true, updatedAt: true,
+  needsReview: true, // set by the Box import; cleared only by "Mark reviewed" (which logs it)
 });
 export type InsertPipeline = z.infer<typeof insertPipelineSchema>;
 export type PipelineDeal = typeof pipeline.$inferSelect;
@@ -296,3 +298,18 @@ export const underwriting = sqliteTable("underwriting", {
 export const insertUnderwritingSchema = createInsertSchema(underwriting).omit({ id: true });
 export type InsertUnderwriting = z.infer<typeof insertUnderwritingSchema>;
 export type UnderwritingDeal = typeof underwriting.$inferSelect;
+
+// ─── Box import ───────────────────────────────────────────────────────────
+// One row per file seen in the Box "Deals Inbox" folder, keyed by Box's file id so a file is
+// handled once even if it's renamed. Files waiting for a later run (daily limit) have no row yet.
+export const boxFiles = sqliteTable("box_files", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  boxId: text("box_id").notNull().unique(),
+  name: text("name").notNull(),
+  size: integer("size"),
+  status: text("status").notNull(),          // processed | failed | skipped
+  dealId: integer("deal_id"),                // the deal created (null if failed, skipped or the deal was deleted)
+  error: text("error"),                      // why it failed or was skipped
+  processedAt: text("processed_at").notNull(), // ISO timestamp
+});
+export type BoxFile = typeof boxFiles.$inferSelect;

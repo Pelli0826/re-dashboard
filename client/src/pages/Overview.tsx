@@ -1,10 +1,13 @@
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
+import type { BoxFile } from "@shared/schema";
+import { OPEN_DEAL_KEY } from "./Pipeline";
 import type { Project, PipelineDeal, ArmLoan } from "@shared/schema";
 import { STAGE_LABELS, ACTIVE_STAGES, effectiveProbability, type Stage } from "@shared/pipeline";
-import { Building2, TrendingUp, DollarSign, AlertTriangle, CheckCircle2, Clock, Loader2, Mail } from "lucide-react";
+import { Building2, TrendingUp, DollarSign, AlertTriangle, CheckCircle2, Clock, Loader2, Mail, Inbox } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -86,6 +89,126 @@ function MorningEmailCard() {
   );
 }
 
+interface BoxStatus {
+  configured: boolean; missing: string[]; folderId: string; hour: number; tz: string; limit: number; running: boolean;
+  lastRun: {
+    trigger: string; startedAt: string; finishedAt?: string; folderName?: string;
+    processed: number; skipped: number; failed: number; waiting: number; error?: string;
+  } | null;
+  recent: (BoxFile & { dealCode: string | null; dealName: string | null; needsReview: boolean })[];
+}
+
+const when = (iso: string) => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const errorText = (e: Error) => e.message.replace(/^\d+:\s*/, "").replace(/^\{"message":"|"\}$/g, "");
+
+function BoxImportCard() {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [, navigate] = useLocation();
+  const { data: st } = useQuery<BoxStatus>({
+    queryKey: ["/api/box/status"],
+    refetchInterval: q => (q.state.data?.running ? 3000 : false),
+  });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["/api/box/status"] });
+    qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
+  };
+  // When a run finishes, pick up the deals and contacts it created.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && st && !st.running) {
+      qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
+      qc.invalidateQueries({ queryKey: ["/api/contacts"] });
+      qc.invalidateQueries({ queryKey: ["/api/underwriting"] });
+    }
+    wasRunning.current = !!st?.running;
+  }, [st?.running]);
+  const run = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/box/run")).json(),
+    onSuccess: () => { toast({ title: "Checking Box", description: "New PDFs take about a minute each. This card updates when it's done." }); refresh(); },
+    onError: (e: Error) => toast({ title: "Could not check Box", description: errorText(e), variant: "destructive" }),
+  });
+  const retry = useMutation({
+    mutationFn: async (id: number) => { await apiRequest("POST", `/api/box/files/${id}/retry`); return (await apiRequest("POST", "/api/box/run")).json(); },
+    onSuccess: () => { toast({ title: "Trying the file again" }); refresh(); },
+    onError: (e: Error) => toast({ title: "Could not try again", description: errorText(e), variant: "destructive" }),
+  });
+  if (!st) return null;
+  const time = new Date(2000, 0, 1, st.hour).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const tzShort = st.tz === "America/New_York" ? "Eastern" : st.tz;
+  const lr = st.lastRun;
+  const openDeal = (id: number) => {
+    try { sessionStorage.setItem(OPEN_DEAL_KEY, String(id)); } catch { /* storage unavailable */ }
+    navigate("/pipeline");
+  };
+  const counts = lr ? [
+    `${lr.processed} deal${lr.processed === 1 ? "" : "s"} created`,
+    lr.skipped ? `${lr.skipped} skipped` : "",
+    lr.failed ? `${lr.failed} failed` : "",
+    lr.waiting ? `${lr.waiting} waiting for the next run` : "",
+  ].filter(Boolean).join(", ") : "";
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold text-foreground flex items-center gap-2"><Inbox size={14} /> Box import</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {st.configured ? (
+          <p className="text-muted-foreground">
+            Checks {lr?.folderName ? <span className="text-foreground">{lr.folderName}</span> : "the Box folder"} (ID {st.folderId}) every evening at {time} {tzShort} and
+            turns up to {st.limit} new PDFs into deals in Lead, marked Needs review. It never changes anything in Box.
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            Not set up. In Railway, add {st.missing.map((m, i) => <span key={m}>{i ? ", " : ""}<code className="text-foreground">{m}</code></span>)}.
+          </p>
+        )}
+        {st.running ? (
+          <p className="flex items-center gap-2 text-foreground"><Loader2 size={13} className="animate-spin" /> Checking Box now…</p>
+        ) : lr?.finishedAt ? (
+          lr.error
+            ? <p role="alert" className="text-red-700 dark:text-red-300">Last check ({when(lr.finishedAt)}) failed: {lr.error}{counts && lr.processed + lr.skipped + lr.failed ? ` Before it stopped: ${counts}.` : ""}</p>
+            : <p className="text-muted-foreground">Last checked {when(lr.finishedAt)}{lr.trigger === "manual" ? " (by hand)" : ""}: {counts}.</p>
+        ) : st.configured ? <p className="text-muted-foreground">Not checked yet.</p> : null}
+        {st.recent.length > 0 && (
+          <ul className="divide-y divide-border border-y border-border">
+            {st.recent.map(f => (
+              <li key={f.id} className="py-2 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-foreground truncate" title={f.name}>{f.name}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {f.status === "processed"
+                      ? (f.dealId && f.dealCode
+                        ? <button className="text-primary hover:underline" onClick={() => openDeal(f.dealId!)}>{f.dealCode} {f.dealName}</button>
+                        : "Deal created, since deleted")
+                      : f.error}
+                    {" · "}{when(f.processedAt)}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {f.status === "failed" && (
+                    <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={retry.isPending || st.running} onClick={() => retry.mutate(f.id)}>Try again</Button>
+                  )}
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                    f.status === "processed" ? (f.needsReview ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300" : "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300")
+                    : f.status === "failed" ? "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300"
+                    : "bg-muted text-muted-foreground"}`}>
+                    {f.status === "processed" ? (f.needsReview ? "Needs review" : f.dealCode ? "Reviewed" : "Created") : f.status === "failed" ? "Failed" : "Skipped"}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        <Button size="sm" variant="outline" disabled={!st.configured || st.running || run.isPending} onClick={() => run.mutate()}>
+          {(st.running || run.isPending) && <Loader2 size={13} className="animate-spin mr-1" />} Check Box now
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Overview() {
   const { data: projects = [], isLoading: pLoading } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
   const { data: pipeline = [], isLoading: dLoading } = useQuery<PipelineDeal[]>({ queryKey: ["/api/pipeline"] });
@@ -125,7 +248,7 @@ export default function Overview() {
         <Link href="/pipeline"><Button data-testid="button-go-pipeline">Add a deal</Button></Link>
         <Link href="/projects"><Button variant="outline">Add a project</Button></Link>
       </div>
-      <div className="w-full max-w-md text-left mt-6"><MorningEmailCard /></div>
+      <div className="w-full max-w-md text-left mt-6 space-y-4"><BoxImportCard /><MorningEmailCard /></div>
     </div>
   );
 
@@ -294,7 +417,10 @@ export default function Overview() {
         </CardContent>
       </Card>
 
-      <MorningEmailCard />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <BoxImportCard />
+        <MorningEmailCard />
+      </div>
     </div>
   );
 }

@@ -41,7 +41,14 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `server/storage.ts`: DB location, `CREATE TABLE IF NOT EXISTS` schema, migrations, storage methods.
 - `server/claude.ts`: Anthropic API calls (plain `fetch`, no SDK): OM intake, PDF auto-fill,
   Ask about this deal + `propose_changes` tool.
-- `server/digest.ts`: morning email (Resend HTTPS API) and its scheduler.
+- `server/digest.ts`: morning email (Resend HTTPS API) and its scheduler. Its "New from Box" section
+  lists Box imports since the last scheduled email (`digest:lastSentAt` in `app_state`).
+- `server/box.ts`: nightly Box import (see Box import below). `server/intake.ts`: the steps after
+  Claude reads an OM (broker match/add, attach PDF, memo, linked model), shared by Upload OM and Box.
+- `shared/intake.ts`: `dealFromOm()` (OM → deal fields) and `underwritingFromOm()`. The Upload OM
+  review form gets its starting values from the server (`/api/intake/om` returns `deal`) and finishes
+  through `POST /api/pipeline/:id/intake`, so the form and the Box import can't drift apart. Change the
+  mapping here, never in `Pipeline.tsx`.
 - `server/extract.ts`: Underwriting document auto-fill (Claude first, OpenAI fallback), from a direct
   upload or from a file saved to the linked deal (`POST /api/underwriting/:id/from-file`). Figures only
   fill the form; nothing is saved until the user clicks Save. Operating-statement management fees are
@@ -100,7 +107,9 @@ Live URL: https://re-dashboard-production-929a.up.railway.app
 | `APP_URL` | Optional link target in emails; defaults to the Railway public domain. |
 | `DB_PATH` | Optional override. Don't set it unless the volume setup changes (it hides the storage warning). |
 | `OPENAI_API_KEY` | Legacy fallback only; can be removed. |
-| `ANTHROPIC_BASE_URL`, `RESEND_BASE_URL` | Test-only: point at local mock servers. Never set in Railway. |
+| `BOX_CLIENT_ID`, `BOX_CLIENT_SECRET`, `BOX_ENTERPRISE_ID`, `BOX_FOLDER_ID` | Box import. All four needed; without them the Overview card says what's missing. |
+| `BOX_SYNC_HOUR`, `BOX_DAILY_LIMIT` | Optional: default 18 (6 PM, in `DIGEST_TZ`) and 10 PDFs per run. |
+| `ANTHROPIC_BASE_URL`, `RESEND_BASE_URL`, `BOX_BASE_URL` | Test-only: point at local mock servers. Never set in Railway. |
 
 Variable names are exact (all caps, underscores). Variable changes take effect only after Railway redeploys.
 
@@ -113,12 +122,38 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 - Key tables: `deals` (Pipeline; Drizzle export is named `pipeline`), `deal_activity`,
   `deal_files`, `deal_milestones`, `tasks` (has `deal_id` and `project_id`), `underwriting`
   (has `deal_id`), `projects`, `cash_flow`, `investors`, `documents` (links only), `contacts`,
-  `arm_loans`, `app_state` (key/value: digest status, DD checklist base dates, deal ID counters).
+  `arm_loans`, `box_files` (one row per Box file handled, unique Box file id),
+  `app_state` (key/value: digest status, Box run status, DD checklist base dates, deal ID counters,
+  pending Upload OM readings as `intake:<fileId>`).
+- `deals.needs_review` = 1 for deals the Box import created. It's left out of `insertPipelineSchema`, so
+  edits can't clear it; only `POST /api/pipeline/:id/reviewed` (the "Mark reviewed" button) does, and logs it.
 - Deletes cascade in code: deal → activity, tasks, underwriting, files (also on disk), milestones;
   project → cash flow, investors, documents, tasks, ARM loans (contacts kept, unlinked).
   Confirmation dialogs list the related counts from `/api/pipeline/:id/related` and `/api/projects/:id/related`.
 - Deal IDs (`D-YYYY-NNN`) are never reused; the highest issued number per year is in `app_state`.
 - Sidebar download icon (`/api/backup`) exports all tables as JSON (not the uploaded files).
+  New tables must be added to `exportAll()` in `storage.ts`.
+- Deleting a deal keeps its `box_files` row (deal id set to null) so the file isn't imported again.
+
+## Box import (built 2026-10-27)
+
+- Each evening at `BOX_SYNC_HOUR` (default 6 PM, `DIGEST_TZ`) the server lists the "Deals Inbox"
+  folder (`BOX_FOLDER_ID`) and imports new PDFs: download → `analyzeOm` → `mathCheck` → broker
+  matched or added → deal created in **Lead** through `createDeal()` in `routes.ts` (the same path as
+  the Add deal form) with `needs_review = 1` → `finishOmIntake()` saves the OM file, the screening memo
+  and, when the OM has income figures, a linked model → activity "Created from Box file <name>. Needs review."
+- Scheduling follows the morning email's pattern: checks every 5 minutes, catches up later the same
+  evening if the server was down, claims the day in `app_state` (`box:lastRunDate`) before running so it
+  never runs twice in a day. Last run result is `box:lastRun` (JSON). "Check Box now" runs it on demand.
+- Read-only in Box: Client Credentials Grant token, `GET /2.0/folders/:id`, `GET .../items`,
+  `GET /2.0/files/:id/content` (follows Box's redirect to the download address). Never add calls that
+  move, rename, delete or upload.
+- Each Box file is handled once, keyed by Box file id (renaming doesn't re-import). Non-PDFs and PDFs
+  over 24 MB are recorded as skipped with the reason. Only PDFs count toward `BOX_DAILY_LIMIT`; the
+  oldest go first and the rest wait for the next run (no row yet). A file Claude fails on is recorded
+  as failed; "Try again" on the Overview card deletes that row and runs again. Problems that would fail
+  every file (Box sign-in, folder access, Anthropic key or credits) stop the run, leave the files
+  unrecorded, and show the reason on the card and in the next morning email.
 
 ## Product rules (decided with the owner; keep them)
 
@@ -148,7 +183,11 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 
 ## Testing
 
-There is no test suite. What has worked:
+There is no general test suite. What has worked:
+
+- Box import: `npm run build && npx tsx script/test-box-import.ts` runs the built server against
+  mock Box and Anthropic servers and checks the whole flow (48 checks). Add `--serve` to leave the dev
+  server and mocks running at http://127.0.0.1:5075 afterwards to look at the UI.
 
 - `npm run check` (compare against the known baseline below) and `npm run build`.
 - Run the built server against a throwaway DB, then exercise the API with curl:
@@ -166,7 +205,7 @@ There is no test suite. What has worked:
 
 ## Known issues
 
-- `npm run check` reports 24 errors, all pre-existing in `client/src/pages/Underwriting.tsx`
+- `npm run check` reports 24 errors, all pre-existing in `client/src/components/ModelWorkspace.tsx`
   (`number | undefined` from form state). The build works. Don't add new errors; fixing these
   is a reasonable cleanup task.
 - The default model is `claude-sonnet-5` (works in production). Newer models exist, e.g.

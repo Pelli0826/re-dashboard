@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
+import { UW_TYPE } from "@shared/intake";
 
 // ─── Formatting ────────────────────────────────────────────────────────────
 function fmt$(n: number): string {
@@ -654,7 +655,7 @@ function VaTable({ r }: { r: VaResult }) {
 }
 
 // ─── A deal's Underwriting tab: its model(s), or a button to start one ────
-export const UW_TYPE: Record<string, string> = { multifamily: "multifamily", land: "development" };
+export { UW_TYPE };
 
 export function DealUnderwriting({ deal }: { deal: PipelineDeal }) {
   const { toast } = useToast();

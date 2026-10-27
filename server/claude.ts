@@ -2,6 +2,8 @@
 // Uses plain fetch, so no extra npm package is needed.
 // Requires ANTHROPIC_API_KEY. Optional: ANTHROPIC_MODEL (default below).
 import { DEAL_TYPES } from "@shared/pipeline";
+import type { OmAnalysis } from "@shared/intake";
+export type { OmAnalysis };
 
 const API_URL = process.env.ANTHROPIC_BASE_URL
   ? `${process.env.ANTHROPIC_BASE_URL.replace(/\/$/, "")}/v1/messages`
@@ -303,19 +305,6 @@ Rules:
 - Use in-place figures for NOI and income. If only pro forma figures exist, leave them null and say so in missingInfo.
 - For land or redevelopment sites priced on future use, set propertyType to "land" and list each use option in scenarios.
 - keyRisks, missingInfo and brokerQuestions should be specific to this property, not generic checklists. Aim for 3-6 items each.`;
-
-export interface OmAnalysis {
-  dealName: string; address?: string | null; municipality?: string | null; county?: string | null; state?: string | null;
-  propertyType: string; askingPrice?: number | null; priceNotes?: string | null;
-  units?: number | null; buildingSf?: number | null; acres?: number | null; yearBuilt?: number | null; occupancyPct?: number | null;
-  noi?: number | null; capRatePct?: number | null; grossPotentialRent?: number | null; vacancyPct?: number | null;
-  otherIncome?: number | null; operatingExpenses?: number | null;
-  zoning?: string | null; floodZone?: string | null; utilities?: string | null; groundLease?: boolean;
-  sellerName?: string | null; reasonForSale?: string | null; offersDue?: string | null;
-  broker?: { name?: string | null; company?: string | null; phone?: string | null; email?: string | null };
-  scenarios?: { label: string; use: string; buildingSf?: number | null; units?: number | null; notes?: string | null }[];
-  summary: string; keyRisks: string[]; missingInfo: string[]; brokerQuestions: string[];
-}
 
 export async function analyzeOm(pdf: Buffer): Promise<OmAnalysis> {
   const raw = await callClaude(pdf, OM_PROMPT, OM_TOOL, 8000);

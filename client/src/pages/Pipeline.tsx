@@ -12,12 +12,14 @@ import {
   type Stage, type DevelopmentScenario, type Deadline, milestoneAlerts, nextDeadlineWithMilestones, daysUntil,
 } from "@shared/pipeline";
 import {
-  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check, FileText, Building2,
+  Plus, Pencil, Trash2, Loader2, Search, AlertTriangle, CalendarClock, X, Phone, Mail, CheckCircle2, Circle, FileUp, Sparkles, Calculator, Paperclip, Download, MessageSquare, Send, Flag, Check, FileText, Building2, Inbox,
 } from "lucide-react";
 import type { Project } from "@shared/schema";
 import { PSA_STAGES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import { LoiDialog } from "@/components/LoiDialog";
-import { DealUnderwriting, UW_TYPE } from "@/components/ModelWorkspace";
+import { DealUnderwriting } from "@/components/ModelWorkspace";
+import type { OmAnalysis } from "@shared/intake";
+import type { BoxFile } from "@shared/schema";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -82,19 +84,11 @@ const stagePill: Record<string, string> = {
 const tempDot: Record<string, string> = { hot: "bg-red-500", warm: "bg-amber-500", cold: "bg-sky-500" };
 
 // What the server returns from /api/intake/om
-interface OmAnalysis {
-  dealName: string; address?: string | null; municipality?: string | null; county?: string | null; state?: string | null;
-  propertyType: string; askingPrice?: number | null; priceNotes?: string | null;
-  units?: number | null; buildingSf?: number | null; acres?: number | null; yearBuilt?: number | null; occupancyPct?: number | null;
-  noi?: number | null; capRatePct?: number | null; grossPotentialRent?: number | null; vacancyPct?: number | null;
-  otherIncome?: number | null; operatingExpenses?: number | null;
-  zoning?: string | null; floodZone?: string | null; utilities?: string | null; groundLease?: boolean;
-  sellerName?: string | null; reasonForSale?: string | null; offersDue?: string | null;
-  broker?: { name?: string | null; company?: string | null; phone?: string | null; email?: string | null };
-  scenarios?: DevelopmentScenario[];
-  summary: string; keyRisks: string[]; missingInfo: string[]; brokerQuestions: string[];
+interface Intake {
+  analysis: OmAnalysis; mathCheck: string[]; memo: string; brokerContactId: number | null; fileName: string; fileId: number;
+  deal: Partial<PipelineDeal>;  // starting values, mapped on the server by dealFromOm (same as the Box import)
+  hasIncome: boolean;
 }
-interface Intake { analysis: OmAnalysis; mathCheck: string[]; memo: string; brokerContactId: number | null; fileName: string; fileId?: number }
 
 function TempBadge({ t }: { t: string }) {
   return (
@@ -102,6 +96,9 @@ function TempBadge({ t }: { t: string }) {
       <span className={`w-2 h-2 rounded-full ${tempDot[t] ?? "bg-gray-400"}`} aria-hidden /> {t}
     </span>
   );
+}
+function ReviewBadge() {
+  return <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded whitespace-nowrap text-amber-800 bg-amber-100 dark:text-amber-300 dark:bg-amber-900/30"><Inbox size={11} />Needs review</span>;
 }
 function DeadlineChip({ dl }: { dl: Deadline }) {
   const tone = dl.days < 0 ? "text-red-700 bg-red-100 dark:text-red-300 dark:bg-red-900/30"
@@ -119,6 +116,7 @@ export default function Pipeline() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [tempFilter, setTempFilter] = useState("all");
   const [showInactive, setShowInactive] = useState(false);
+  const [reviewOnly, setReviewOnly] = useState(false);
   const [formDeal, setFormDeal] = useState<PipelineDeal | "new" | null>(null);
   // Opened from another tab (e.g. a project's "Open deal" button).
   const [detailId, setDetailId] = useState<number | null>(() => {
@@ -220,12 +218,14 @@ export default function Pipeline() {
     return deals.filter(d => {
       if (typeFilter !== "all" && d.type !== typeFilter) return false;
       if (tempFilter !== "all" && d.temperature !== tempFilter) return false;
+      if (reviewOnly && !d.needsReview) return false;
       if (!q) return true;
       const broker = d.brokerContactId ? contactMap[d.brokerContactId] : undefined;
       return [d.name, d.address, d.municipality, d.county, d.dealCode, d.sellerName, broker?.name, broker?.company, d.notes]
         .some(v => v?.toLowerCase().includes(q));
     });
-  }, [deals, search, typeFilter, tempFilter, contactMap]);
+  }, [deals, search, typeFilter, tempFilter, reviewOnly, contactMap]);
+  const reviewCount = deals.filter(d => d.needsReview).length;
 
   const active = filtered.filter(d => ACTIVE_STAGES.includes(d.stage as Stage));
   const inactive = filtered.filter(d => !ACTIVE_STAGES.includes(d.stage as Stage));
@@ -329,6 +329,12 @@ export default function Pipeline() {
           <Switch checked={showInactive} onCheckedChange={setShowInactive} aria-label="Show closed and dead deals" />
           Show closed and dead
         </label>
+        {(reviewCount > 0 || reviewOnly) && (
+          <label className="flex items-center gap-2 text-sm text-muted-foreground ml-1">
+            <Switch checked={reviewOnly} onCheckedChange={setReviewOnly} aria-label="Show only deals that need review" />
+            Needs review only ({reviewCount})
+          </label>
+        )}
       </div>
 
       {/* Empty state */}
@@ -378,6 +384,7 @@ export default function Pipeline() {
                           <span className="text-[11px] text-muted-foreground">{d.dealCode}</span>
                           <span className="text-[11px] text-muted-foreground">{inStage}d in stage</span>
                           {dl && dl.days <= 14 && <DeadlineChip dl={dl} />}
+                          {d.needsReview ? <ReviewBadge /> : null}
                         </div>
                       </button>
                     );
@@ -418,7 +425,7 @@ export default function Pipeline() {
                     return (
                       <tr key={d.id} className="hover:bg-muted/40 cursor-pointer" onClick={() => openDeal(d.id)}>
                         <td className="px-4 py-2.5 min-w-[220px]">
-                          <div className="font-medium text-foreground leading-snug">{d.name}</div>
+                          <div className="font-medium text-foreground leading-snug flex flex-wrap items-center gap-1.5">{d.name}{d.needsReview ? <ReviewBadge /> : null}</div>
                           <div className="text-xs text-muted-foreground">{d.dealCode}, {DEAL_TYPE_LABELS[d.type] ?? d.type}{d.municipality ? `, ${d.municipality}` : ""}</div>
                         </td>
                         <td className="px-4 py-2.5"><span className={`text-xs px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${stagePill[d.stage]}`}>{STAGE_LABELS[d.stage as Stage] ?? d.stage}</span></td>
@@ -999,6 +1006,19 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tasks"] }),
   });
 
+  const { data: boxFiles = [] } = useQuery<BoxFile[]>({ queryKey: ["/api/box/files"], enabled: !!deal?.needsReview });
+  const boxFile = deal ? boxFiles.find(f => f.dealId === deal.id) : undefined;
+  const markReviewed = useMutation({
+    mutationFn: () => apiRequest("POST", `/api/pipeline/${deal!.id}/reviewed`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/pipeline"] });
+      qc.invalidateQueries({ queryKey: ["/api/pipeline", deal!.id, "activity"] });
+      qc.invalidateQueries({ queryKey: ["/api/box/status"] });
+      toast({ title: "Marked reviewed" });
+    },
+    onError: (e: Error) => toast({ title: "Could not mark reviewed", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
+  });
+
   const scenarios = deal ? parseScenarios(deal.scenarios) : [];
   const { data: dealMs = [] } = useQuery<DealMilestone[]>({ queryKey: ["/api/milestones"], enabled: !!deal });
   const dl = deal ? nextDeadlineWithMilestones(deal, dealMs) : null;
@@ -1029,6 +1049,17 @@ function DealDetailSheet({ deal, broker, onClose, onEdit, onDelete, onStage, sta
               </div>
             </div>
 
+            {deal.needsReview ? (
+              <div role="status" className="flex flex-wrap items-center gap-3 rounded-md border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
+                <Inbox size={15} className="shrink-0" />
+                <span className="flex-1 min-w-[200px]">
+                  {boxFile ? <>Created from Box file <span className="font-medium">{boxFile.name}</span>; check the figures against the OM.</> : "Created automatically from an OM; check the figures against the OM."}
+                </span>
+                <Button size="sm" variant="outline" className="gap-1 bg-background" disabled={markReviewed.isPending} onClick={() => markReviewed.mutate()}>
+                  {markReviewed.isPending ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Mark reviewed
+                </Button>
+              </div>
+            ) : null}
             {deal.stage === "dead" && deal.deadReason && (
               <p className="text-sm rounded-md bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-300 px-3 py-2">Dead: {deal.deadReason}</p>
             )}
@@ -1219,24 +1250,12 @@ const MONEY_FIELDS = ["askingPrice", "offerPrice", "noi", "projectedValue"] as c
 const DECIMAL_FIELDS = ["capRate", "acres", "occupancy"] as const;
 const INT_FIELDS = ["units", "sqft", "yearBuilt", "probabilityOverride"] as const;
 
-function fromIntake(a: OmAnalysis, brokerContactId: number | null): FormState {
-  const f = toForm(null);
-  const put = (k: string, v: unknown) => { if (v != null && v !== "") f[k] = String(v); };
-  put("name", a.dealName); put("address", a.address); put("municipality", a.municipality); put("county", a.county);
-  put("state", a.state); put("type", a.propertyType); put("askingPrice", a.askingPrice); put("priceNotes", a.priceNotes);
-  put("units", a.units); put("sqft", a.buildingSf); put("acres", a.acres); put("yearBuilt", a.yearBuilt);
-  put("occupancy", a.occupancyPct); put("noi", a.noi); put("capRate", a.capRatePct);
-  put("zoning", a.zoning); put("floodZone", a.floodZone); put("utilities", a.utilities);
-  put("sellerName", a.sellerName); put("reasonForSale", a.reasonForSale);
-  f.keyRisks = a.keyRisks.join("\n");
-  if (a.offersDue) f.notes = `Offers due ${a.offersDue}.`;
-  f.groundLease = a.groundLease ? "1" : "0";
-  f.stage = "screening";
-  if (a.broker?.name || brokerContactId) f.source = "broker";
-  f.brokerContactId = brokerContactId ? String(brokerContactId) : a.broker?.name ? "new" : "none";
+// The server maps Claude's reading to deal fields (dealFromOm); the form only turns them into text.
+function fromIntake(intake: Intake): FormState {
+  const f = toForm(intake.deal as PipelineDeal);
+  if (!intake.deal.brokerContactId && intake.analysis.broker?.name) f.brokerContactId = "new";
   return f;
 }
-
 
 function toForm(d: PipelineDeal | null): FormState {
   const f: FormState = {};
@@ -1270,13 +1289,12 @@ function DealFormDialog({ deal, intake, contacts, onClose, onSaved }: {
 }) {
   const { toast } = useToast();
   const a = intake?.analysis;
-  const [f, setF] = useState<FormState>(() => a ? fromIntake(a, intake!.brokerContactId) : toForm(deal));
-  const [scenarios, setScenarios] = useState<DevelopmentScenario[]>(() => a?.scenarios?.length ? a.scenarios : parseScenarios(deal?.scenarios));
+  const [f, setF] = useState<FormState>(() => intake ? fromIntake(intake) : toForm(deal));
+  const [scenarios, setScenarios] = useState<DevelopmentScenario[]>(() => parseScenarios(intake ? intake.deal.scenarios : deal?.scenarios));
   const [newBroker, setNewBroker] = useState({
     name: a?.broker?.name ?? "", company: a?.broker?.company ?? "", phone: a?.broker?.phone ?? "", email: a?.broker?.email ?? "",
   });
-  const hasIncome = !!(a && (a.grossPotentialRent || a.noi));
-  const [createUw, setCreateUw] = useState(hasIncome);
+  const [createUw, setCreateUw] = useState(!!intake?.hasIncome);
   const [deadReason, setDeadReason] = useState(deal?.deadReason ?? "");
   const set = (k: string) => (v: string) => setF(prev => ({ ...prev, [k]: v }));
   const brokers = contacts.filter(c => c.role === "broker");
@@ -1308,25 +1326,9 @@ function DealFormDialog({ deal, intake, contacts, onClose, onSaved }: {
         : await apiRequest("POST", "/api/pipeline", payload);
       const saved = (await res.json()) as PipelineDeal;
 
-      if (!deal && intake && a) {
-        // Keep Claude's screening with the deal, then optionally start an underwriting model.
-        await apiRequest("POST", `/api/pipeline/${saved.id}/activity`, { kind: "note", date: today(), summary: intake.memo });
-        if (intake.fileId) await apiRequest("PATCH", `/api/files/${intake.fileId}`, { dealId: saved.id });
-        if (createUw) {
-          await apiRequest("POST", "/api/underwriting", {
-            name: `${saved.dealCode} ${saved.name}`,
-            dealId: saved.id,
-            dealType: UW_TYPE[saved.type] ?? "commercial",
-            address: [saved.address, saved.municipality].filter(Boolean).join(", "),
-            createdAt: new Date().toISOString(),
-            purchasePrice: saved.askingPrice ?? 0,
-            grossPotentialRent: a.grossPotentialRent ?? 0,
-            vacancyRate: a.vacancyPct ?? 5,
-            otherIncome: a.otherIncome ?? 0,
-            operatingExpenses: a.operatingExpenses ?? 0,
-            notes: `Created from ${intake.fileName}. Check all figures against the OM.`,
-          });
-        }
+      if (!deal && intake) {
+        // Attach the OM, keep Claude's screening, and optionally start an underwriting model (same steps as the Box import).
+        await apiRequest("POST", `/api/pipeline/${saved.id}/intake`, { fileId: intake.fileId, createUnderwriting: createUw });
       }
       return saved;
     },

@@ -10,6 +10,9 @@ import { analyzeOm, mathCheck, screeningMemo, claudeConfigured, MAX_PDF_BYTES, a
 import { buildProforma, calcReturns, maxPriceForIrr } from "@shared/underwriting";
 import { storage, DB_IS_PERSISTENT, getState, setState, deleteState } from "./storage";
 import { buildLoiDocx } from "./loi";
+import { matchBrokerContact, finishOmIntake } from "./intake";
+import { configureBoxImport, runBoxImport, boxStatus, boxConfig, boxRunning } from "./box";
+import { dealFromOm, omHasIncome, type OmAnalysis } from "@shared/intake";
 import { defaultLoiTerms, type LoiTerms } from "@shared/loi";
 import { projectFromDeal, PSA_STAGES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import {
@@ -163,18 +166,37 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(d);
   });
 
-  app.post("/api/pipeline", (req, res) => {
-    const parsed = dealInput.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ message: readable(parsed.error) });
-    if (parsed.data.stage === "dead" && !parsed.data.deadReason) {
-      return res.status(400).json({ message: "A reason is required when marking a deal dead." });
-    }
-    const deal = storage.createPipelineDeal(parsed.data);
+  // One path for new deals: the Add deal form, the Upload OM review form and the Box import.
+  // `extra` sets fields users can't send (the Box import's needsReview flag).
+  function createDeal(body: unknown, extra: Partial<PipelineDeal> = {}): { deal?: PipelineDeal; error?: string } {
+    const parsed = dealInput.safeParse(body);
+    if (!parsed.success) return { error: readable(parsed.error) };
+    if (parsed.data.stage === "dead" && !parsed.data.deadReason) return { error: "A reason is required when marking a deal dead." };
+    let deal = storage.createPipelineDeal(parsed.data);
+    if (Object.keys(extra).length) deal = storage.updatePipelineDeal(deal.id, extra)!;
     const today = new Date().toISOString().slice(0, 10);
     storage.addDealActivity(deal.id, deal.firstContactDate || today, "created", `Deal added in ${STAGE_LABELS[deal.stage as Stage]}`);
     if (deal.stage === "due-diligence") createDueDiligenceTasks(deal);
     if (PSA_STAGES.includes(deal.stage)) createProjectForDeal(deal);
-    res.status(201).json(storage.getPipelineDeal(deal.id));
+    return { deal: storage.getPipelineDeal(deal.id)! };
+  }
+  configureBoxImport({ createDeal });
+
+  app.post("/api/pipeline", (req, res) => {
+    const r = createDeal(req.body);
+    if (!r.deal) return res.status(400).json({ message: r.error });
+    res.status(201).json(r.deal);
+  });
+
+  // Clears the "Needs review" flag on a deal the Box import created.
+  app.post("/api/pipeline/:id/reviewed", (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    if (deal.needsReview) {
+      storage.updatePipelineDeal(deal.id, { needsReview: 0 });
+      storage.addDealActivity(deal.id, todayYmd(), "note", "Marked reviewed: figures checked against the OM.");
+    }
+    res.json(storage.getPipelineDeal(deal.id));
   });
 
   // One update path for the edit form, stage moves and applied suggestions.
@@ -571,25 +593,41 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const analysis = await analyzeOm(req.file.buffer);
       const checks = mathCheck(analysis);
-      // Match the listing broker to an existing contact by name or email.
-      const b = analysis.broker;
-      const match = b?.name || b?.email
-        ? storage.getContacts().find(c =>
-            (b.email && c.email?.toLowerCase() === b.email.toLowerCase()) ||
-            (b.name && c.name.trim().toLowerCase() === b.name.trim().toLowerCase()))
-        : undefined;
-      // Keep the PDF; it's attached to the deal when the review form is saved.
+      const memo = screeningMemo(analysis, checks, req.file.originalname);
+      const match = matchBrokerContact(analysis.broker);
+      // Keep the PDF and the reading; both go to the deal when the review form is saved.
       const saved = storage.saveDealFile(req.file.buffer, req.file.originalname, "application/pdf", null, "om");
+      setState(`intake:${saved.id}`, JSON.stringify({ analysis, memo, fileName: req.file.originalname }));
       res.json({
         analysis,
         mathCheck: checks,
-        memo: screeningMemo(analysis, checks, req.file.originalname),
+        memo,
         brokerContactId: match?.id ?? null,
         fileId: saved.id,
+        // The review form's starting values: the same mapping the Box import uses.
+        deal: dealFromOm(analysis, { stage: "screening", brokerContactId: match?.id ?? null, today: todayYmd() }),
+        hasIncome: omHasIncome(analysis),
       });
     } catch (err: any) {
       res.status(502).json({ message: err.message ?? "Could not read this OM." });
     }
+  });
+
+  // After the review form saves the deal: attach the OM, save the screening memo, and create the
+  // linked underwriting model if the box was ticked (finishOmIntake, shared with the Box import).
+  app.post("/api/pipeline/:id/intake", (req, res) => {
+    const deal = storage.getPipelineDeal(Number(req.params.id));
+    if (!deal) return res.status(404).json({ message: "Deal not found" });
+    const fileId = Number(req.body?.fileId);
+    const raw = getState(`intake:${fileId}`);
+    const file = storage.getDealFile(fileId);
+    if (!raw || !file || file.dealId != null) {
+      return res.status(410).json({ message: "This OM reading has expired (OMs not saved within a day are removed). Upload the OM again." });
+    }
+    const intake = JSON.parse(raw) as { analysis: OmAnalysis; memo: string; fileName: string };
+    const { model } = finishOmIntake(deal, { ...intake, fileId, createUnderwriting: req.body?.createUnderwriting === true });
+    deleteState(`intake:${fileId}`);
+    res.json({ ok: true, underwritingId: model?.id ?? null });
   });
 
   // ── Deal files ─────────────────────────────────────────────────────
@@ -988,6 +1026,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     }
     storage.addDealActivity(deal.id, today, "note", `Applied Claude's suggestion: ${a.summary}.${a.reason ? ` ${a.reason}` : ""}`);
+    res.json({ ok: true });
+  });
+
+  // ── Box import ─────────────────────────────────────────────────────
+  app.get("/api/box/status", (_req, res) => res.json(boxStatus()));
+  app.get("/api/box/files", (_req, res) => res.json(storage.getBoxFiles()));
+  app.post("/api/box/run", (_req, res) => {
+    const cfg = boxConfig();
+    if (!cfg.configured) return res.status(400).json({ message: `Box import isn't set up. Add ${cfg.missing.join(", ")} in Railway.` });
+    const already = boxRunning();
+    runBoxImport("manual"); // runs in the background; the Overview card follows /api/box/status
+    res.status(202).json({ started: !already, running: true });
+  });
+  // Try a failed file again on the next run.
+  app.post("/api/box/files/:id/retry", (req, res) => {
+    const f = storage.getBoxFiles().find(x => x.id === Number(req.params.id));
+    if (!f) return res.status(404).json({ message: "Not found" });
+    if (f.status !== "failed") return res.status(400).json({ message: "Only failed files can be tried again." });
+    storage.deleteBoxFile(f.id);
     res.json({ ok: true });
   });
 

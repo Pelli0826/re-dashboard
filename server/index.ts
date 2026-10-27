@@ -7,6 +7,7 @@ import crypto from "crypto";
 import { registerRoutes } from "./routes";
 import { DATA_DIR } from "./storage";
 import { startDigestScheduler } from "./digest";
+import { startBoxScheduler } from "./box";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 
@@ -103,6 +104,7 @@ app.use((req, res, next) => {
 (async () => {
   await registerRoutes(httpServer, app);
   startDigestScheduler();
+  startBoxScheduler();
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
@@ -136,7 +138,7 @@ app.use((req, res, next) => {
     {
       port,
       host: "0.0.0.0",
-      reusePort: true,
+      reusePort: process.platform === "linux", // macOS on Node 22+ rejects it (ENOTSUP); Railway runs Linux
     },
     () => {
       log(`serving on port ${port}`);

@@ -4,7 +4,8 @@ import fs from "fs";
 import crypto from "crypto";
 import path from "path";
 import {
-  projects, pipeline, dealActivity, dealFiles, dealMilestones, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting
+  projects, pipeline, dealActivity, dealFiles, dealMilestones, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting,
+  boxFiles,
 } from "@shared/schema";
 import type {
   Project, InsertProject,
@@ -17,6 +18,7 @@ import type {
   Document, InsertDocument,
   Task, InsertTask,
   UnderwritingDeal, InsertUnderwriting,
+  BoxFile,
 } from "@shared/schema";
 import { eq, desc, like } from "drizzle-orm";
 
@@ -67,7 +69,8 @@ sqlite.exec(`
     first_contact_date TEXT, loi_date TEXT, loi_expiration TEXT, contract_date TEXT,
     dd_end_date TEXT, closing_date TEXT,
     stage_changed_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, notes TEXT
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, notes TEXT,
+    needs_review INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS deal_activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +146,11 @@ sqlite.exec(`
     exit_cap_rate REAL NOT NULL DEFAULT 5.5, selling_costs REAL NOT NULL DEFAULT 2,
     preferred_return REAL NOT NULL DEFAULT 8, notes TEXT, value_add TEXT
   );
+  CREATE TABLE IF NOT EXISTS box_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    box_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, size INTEGER,
+    status TEXT NOT NULL, deal_id INTEGER, error TEXT, processed_at TEXT NOT NULL
+  );
 `);
 
 function removeStoredFile(storedName: string) {
@@ -179,6 +187,7 @@ addColumnIfMissing("tasks", "deal_id", "deal_id INTEGER");
 addColumnIfMissing("underwriting", "deal_id", "deal_id INTEGER");
 addColumnIfMissing("projects", "deal_id", "deal_id INTEGER");
 addColumnIfMissing("underwriting", "value_add", "value_add TEXT");
+addColumnIfMissing("deals", "needs_review", "needs_review INTEGER NOT NULL DEFAULT 0");
 
 // Link models created from an OM before linking existed (named "D-2026-001 …").
 {
@@ -223,6 +232,10 @@ export interface IStorage {
   createMilestone(data: { dealId: number; name: string; dueDate: string | null; notes: string | null }): DealMilestone;
   updateMilestone(id: number, data: Partial<Pick<DealMilestone, "name" | "dueDate" | "notes" | "status" | "completedAt">>): DealMilestone | undefined;
   deleteMilestone(id: number): void;
+  getBoxFiles(): BoxFile[];
+  getBoxFileByBoxId(boxId: string): BoxFile | undefined;
+  recordBoxFile(data: Omit<BoxFile, "id">): BoxFile;
+  deleteBoxFile(id: number): void;
   getDealActivity(dealId: number): DealActivity[];
   addDealActivity(dealId: number, date: string, kind: string, summary: string): DealActivity;
   // ARM
@@ -297,6 +310,7 @@ export class DatabaseStorage implements IStorage {
       db.delete(tasks).where(eq(tasks.dealId, id)).run();
       db.delete(underwriting).where(eq(underwriting.dealId, id)).run();
       db.update(projects).set({ dealId: null }).where(eq(projects.dealId, id)).run();
+      db.update(boxFiles).set({ dealId: null }).where(eq(boxFiles.dealId, id)).run(); // keep the record so the file isn't imported again
       db.delete(pipeline).where(eq(pipeline.id, id)).run();
       deleteState(`loi:${id}`);
     })();
@@ -344,7 +358,7 @@ export class DatabaseStorage implements IStorage {
   cleanupPendingFiles() {
     const cutoff = new Date(Date.now() - 86_400_000).toISOString();
     const stale = sqlite.prepare("SELECT id FROM deal_files WHERE deal_id IS NULL AND created_at < ?").all(cutoff) as { id: number }[];
-    for (const f of stale) this.deleteDealFile(f.id);
+    for (const f of stale) { this.deleteDealFile(f.id); deleteState(`intake:${f.id}`); }
     if (stale.length) console.log(`[files] removed ${stale.length} unsaved upload(s)`);
   }
 
@@ -400,6 +414,15 @@ export class DatabaseStorage implements IStorage {
     setState(`dealCode:${year}`, String(next));
     return `${prefix}${String(next).padStart(3, "0")}`;
   }
+  // ── Box import records ──
+  getBoxFiles() { return db.select().from(boxFiles).orderBy(desc(boxFiles.processedAt), desc(boxFiles.id)).all(); }
+  getBoxFileByBoxId(boxId: string) { return db.select().from(boxFiles).where(eq(boxFiles.boxId, boxId)).get(); }
+  recordBoxFile(data: Omit<BoxFile, "id">) {
+    return db.insert(boxFiles).values(data)
+      .onConflictDoUpdate({ target: boxFiles.boxId, set: data }).returning().get();
+  }
+  deleteBoxFile(id: number) { db.delete(boxFiles).where(eq(boxFiles.id, id)).run(); }
+
   getDealActivity(dealId: number) {
     return db.select().from(dealActivity).where(eq(dealActivity.dealId, dealId))
       .orderBy(desc(dealActivity.date), desc(dealActivity.id)).all();
@@ -413,7 +436,7 @@ export class DatabaseStorage implements IStorage {
   // Full export of every table, for the Download backup button.
   exportAll() {
     const tables = ["projects", "deals", "deal_activity", "deal_files", "deal_milestones", "arm_loans", "cash_flow", "contacts",
-      "investors", "documents", "tasks", "underwriting"];
+      "investors", "documents", "tasks", "underwriting", "box_files"];
     const out: Record<string, unknown[]> = {};
     for (const t of tables) out[t] = sqlite.prepare(`SELECT * FROM ${t}`).all();
     return out;

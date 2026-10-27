@@ -34,6 +34,27 @@ Variables: `RESEND_API_KEY` and `DIGEST_TO` (comma-separated) are required. Opti
 Until you verify a domain in Resend, the default sender can only email your own Resend account
 address. The Overview page shows status and has Preview and Send test buttons.
 
+## Box import
+Each evening (6 PM Eastern by default) the app checks one Box folder, "Deals Inbox", for new PDFs,
+reads each one exactly like **Upload OM**, and creates a deal in Lead marked **Needs review**, with
+the OM saved to the deal, the screening memo in its activity log, the broker matched or added to
+Contacts, and an underwriting model when the OM has income figures. It only reads from Box; it never
+moves, renames, deletes or uploads anything there.
+
+- Each Box file is imported once, even if it's renamed. Files that aren't PDFs, or are over 24 MB,
+  are skipped with the reason. At most `BOX_DAILY_LIMIT` PDFs a night (oldest first); the rest wait.
+- The Overview page's **Box import** card shows whether it's set up, the last run, recent files with
+  links to their deals, and a **Check Box now** button. Failed files have **Try again**.
+- The morning email has a **New from Box** section: deals created since the last email, and files that
+  failed or were skipped, with the reason.
+- On the Pipeline, flagged deals show a "Needs review" badge and can be filtered; the deal panel has a
+  **Mark reviewed** button that clears the flag and logs it.
+
+Variables: `BOX_CLIENT_ID`, `BOX_CLIENT_SECRET`, `BOX_ENTERPRISE_ID`, `BOX_FOLDER_ID` (required);
+`BOX_SYNC_HOUR` (0-23, default 18, in `DIGEST_TZ`) and `BOX_DAILY_LIMIT` (default 10) optional.
+The Box app uses Server Authentication (Client Credentials Grant), must be authorized in the Box Admin
+Console, and the Deals Inbox folder must be shared with the app's service account.
+
 ## Backups
 Click the download icon at the bottom of the sidebar (or open `/api/backup` while signed in)
 to download every table as one JSON file. Do this before any change to the Railway service.
@@ -74,4 +95,9 @@ linked to a deal, "Set as our offer" updates the deal (and the model follows).
 ```bash
 npm install
 npm run dev            # http://localhost:5000 (no password needed locally)
+```
+
+Box import test (mock Box and Anthropic, no real calls):
+```bash
+npm run build && npx tsx script/test-box-import.ts
 ```
