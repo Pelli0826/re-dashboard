@@ -29,9 +29,12 @@ GitHub, Resend or Anthropic's console as exact click paths.
 
 - React + Vite + Tailwind + shadcn/ui (client), Express (server), SQLite via better-sqlite3 +
   Drizzle ORM. TypeScript throughout. Node >= 20. Hash routing (wouter `useHashLocation`).
-- `client/src/pages/*.tsx`: one file per sidebar tab. `Pipeline.tsx` is the largest: deal board and the
-  deal workspace (a wide sheet with Overview, Underwriting, Files and Activity tabs), OM intake,
-  milestones, files, Ask about this deal, suggestion cards. There is no separate Underwriting page
+- `client/src/pages/*.tsx`: one file per sidebar tab. `Pipeline.tsx` is the deal board and table, filters
+  and alerts. Its parts are in `client/src/components/pipeline/`: `DealDetailSheet.tsx` (the deal
+  workspace: Overview, Underwriting, Files and Activity tabs), `DealFormDialog.tsx` (Add/Edit deal and the
+  Upload OM review form), `DealMilestones.tsx`, `DealFiles.tsx`, `AskDeal.tsx` (Ask about this deal and
+  suggestion cards), `DealProject.tsx`, `UnderwritingLinks.tsx`, `DeadReasonDialog.tsx`, and `shared.tsx`
+  (formatting helpers and badges). There is no separate Underwriting page
   (decided 2026-10-26): `/underwriting` redirects to the Pipeline; models are always worked on inside
   their deal. New deals open on the Underwriting tab. Unattached models are listed on the Pipeline page.
 - `client/src/components/ModelWorkspace.tsx`: one underwriting model (inputs, Fill in from deal
@@ -57,7 +60,7 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `shared/intake.ts`: `dealFromOm()` (OM → deal fields) and `underwritingFromOm()`. The Upload OM
   review form gets its starting values from the server (`/api/intake/om` returns `deal`) and finishes
   through `POST /api/pipeline/:id/intake`, so the form and the Box import can't drift apart. Change the
-  mapping here, never in `Pipeline.tsx`.
+  mapping here, never in `DealFormDialog.tsx`.
 - `server/extract.ts`: Underwriting document auto-fill (Claude first, OpenAI fallback), from a direct
   upload or from a file saved to the linked deal (`POST /api/underwriting/:id/from-file`). Figures only
   fill the form; nothing is saved until the user clicks Save. Operating-statement management fees are
