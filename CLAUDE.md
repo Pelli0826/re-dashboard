@@ -23,7 +23,7 @@ GitHub, Resend or Anthropic's console as exact click paths.
 2. **Confirm the latest update is in the repo:** `grep -n milestoneAlerts shared/pipeline.ts`
    and `grep -n deal_milestones server/storage.ts` should both match. If not, ask the owner to
    upload the `re-dashboard-milestones` files (from his Claude.ai chat) before changing those areas.
-3. Run `npm install`, `npm run check`, `npm run build` to establish the baseline (see Known issues).
+3. Run `npm install`, `npm run check` (no errors expected), `npm run build`.
 
 ## Stack and layout
 
@@ -40,7 +40,13 @@ GitHub, Resend or Anthropic's console as exact click paths.
   Projects page; links with no project show in "Company documents" below the cards. There is no separate
   Documents page (decided 2026-10-27): `/documents` redirects to `/projects`.
 - `client/src/components/ConfirmDialog.tsx`: `useConfirm()`; every delete must go through it.
-- `server/routes.ts`: all API routes, auth, deal update logic, proposals, file and ask endpoints.
+- `server/routes.ts`: wires up the API (order matters: auth first, then the guard, then each area).
+  Routes live in `server/api/`: `auth.ts` (password, login limit, guard), `records.ts` (projects, backup,
+  ARM, cash flow, contacts, investors, documents, tasks), `pipeline.ts` (deals, milestones, activity),
+  `underwriting.ts` (models, document auto-fill), `dealFiles.ts` (Upload OM, deal files, LOI), `ask.ts`
+  (Ask about this deal, proposals, Apply), `integrations.ts` (Box, morning email); `common.ts` helpers.
+- `server/deals.ts`: deal logic used by several routes and the Box import: `createDeal()`, `updateDeal()`,
+  deal → project sync, DD checklist and re-dating.
 - `server/storage.ts`: DB location, `CREATE TABLE IF NOT EXISTS` schema, migrations, storage methods.
 - `server/claude.ts`: Anthropic API calls (plain `fetch`, no SDK): OM intake, PDF auto-fill,
   Ask about this deal + `propose_changes` tool.
@@ -142,7 +148,7 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 
 - Each evening at `BOX_SYNC_HOUR` (default 6 PM, `DIGEST_TZ`) the server lists the "Deals Inbox"
   folder (`BOX_FOLDER_ID`) and imports new PDFs: download → `analyzeOm` → `mathCheck` → broker
-  matched or added → deal created in **Lead** through `createDeal()` in `routes.ts` (the same path as
+  matched or added → deal created in **Lead** through `createDeal()` in `server/deals.ts` (the same path as
   the Add deal form) with `needs_review = 1` → `finishOmIntake()` saves the OM file, the screening memo
   and, when the OM has income figures, a linked model → activity "Created from Box file <name>. Needs review."
 - Scheduling follows the morning email's pattern: checks every 5 minutes, catches up later the same
@@ -167,7 +173,7 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
   (`{from, addDays, addMonths}`), resolved server-side in `normalizeProposals` (anchors: a literal
   date, `deal.<dateField>`, `milestone:<name>`, including milestones proposed earlier in the same
   batch). OM math checks, IRR and max price are computed in code.
-- **One update path for deals:** `updateDeal()` in `routes.ts` (used by PATCH and Apply). It
+- **One update path for deals:** `updateDeal()` in `server/deals.ts` (used by PATCH and Apply). It
   handles stage changes and dead reasons, syncs linked underwriting purchase price to the offer
   (only when the price actually changed), re-dates the open DD checklist when `ddEndDate` changes,
   and creates the DD checklist on entering Due Diligence.
@@ -179,7 +185,7 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 - Writing in the UI: plain language, sentence case, no jargon. Keep the existing visual style.
 - **Lifecycle: deal → project → property.** A deal becomes a project when the PSA is signed
   (decided 2026-10-26), not at closing: entering Due Diligence, Closing or Closed creates a linked
-  project (`projects.deal_id`) via `syncProject()` in `routes.ts`. Closed moves it to planning; Dead or
+  project (`projects.deal_id`) via `syncProject()` in `server/deals.ts`. Closed moves it to planning; Dead or
   moving back before DD sets it to cancelled (never deleted); reviving reopens it. Deleting a deal
   keeps its project, unlinked. Project vocabulary and `projectFromDeal()` live in `shared/projects.ts`.
   Owned, operating assets will become properties (not built yet).
@@ -192,7 +198,7 @@ There is no general test suite. What has worked:
   mock Box and Anthropic servers and checks the whole flow (48 checks). Add `--serve` to leave the dev
   server and mocks running at http://127.0.0.1:5075 afterwards to look at the UI.
 
-- `npm run check` (compare against the known baseline below) and `npm run build`.
+- `npm run check` (must report no errors) and `npm run build`.
 - Run the built server against a throwaway DB, then exercise the API with curl:
   `PORT=5070 DASHBOARD_PASSWORD=pw DB_PATH=/tmp/t/data.db node dist/index.cjs`.
   Log in with `POST /api/auth/login {"password":"pw"}` while sending `X-Forwarded-Proto: https`
@@ -208,9 +214,6 @@ There is no general test suite. What has worked:
 
 ## Known issues
 
-- `npm run check` reports 24 errors, all pre-existing in `client/src/components/ModelWorkspace.tsx`
-  (`number | undefined` from form state). The build works. Don't add new errors; fixing these
-  is a reasonable cleanup task.
 - The default model is `claude-sonnet-5` (works in production). Newer models exist, e.g.
   `claude-sonnet-5-5`; to try one, set `ANTHROPIC_MODEL` in Railway and test OM upload and Ask
   on a real deal before making it the default in `server/claude.ts`.
