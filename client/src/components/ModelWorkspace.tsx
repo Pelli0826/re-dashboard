@@ -79,7 +79,7 @@ const formSchema = insertUnderwritingSchema.extend({
 });
 type FormValues = z.infer<typeof formSchema>;
 
-const DEFAULT_VALUES: FormValues = {
+const DEFAULT_VALUES = {
   name: "", dealType: "multifamily", address: "", createdAt: new Date().toISOString(),
   purchasePrice: 0, closingCosts: 2, renovationBudget: 0, equityIn: 0,
   grossPotentialRent: 0, vacancyRate: 5, otherIncome: 0,
@@ -87,10 +87,13 @@ const DEFAULT_VALUES: FormValues = {
   loanAmount: 0, interestRate: 7, amortizationYears: 30, interestOnly: 0, ioYears: 0,
   holdYears: 5, rentGrowthRate: 3, expenseGrowthRate: 2,
   exitCapRate: 5.5, sellingCosts: 2, preferredReturn: 8, notes: "",
-};
+} satisfies FormValues;
+// The live calculator always has every number filled in (from the model or these defaults).
+type Defaults = typeof DEFAULT_VALUES;
+type Calc = FormValues & { [K in keyof Defaults as Defaults[K] extends number ? K : never]: number };
 
 // ─── One underwriting model, shown inside its deal's Underwriting tab ──────
-const fromModel = (m: UnderwritingDeal): FormValues => ({ ...DEFAULT_VALUES, ...m, notes: m.notes ?? "" });
+const fromModel = (m: UnderwritingDeal): Calc => ({ ...DEFAULT_VALUES, ...m, notes: m.notes ?? "" });
 
 export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
   const { toast } = useToast();
@@ -104,7 +107,7 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
   const plRef = useRef<HTMLInputElement>(null);
 
   // Live calculator state: mirrors the saved model, plus unsaved edits while editing.
-  const [calc, setCalc] = useState<FormValues>(() => fromModel(model));
+  const [calc, setCalc] = useState<Calc>(() => fromModel(model));
   // Follow the saved model (e.g. "Set as our offer" changed its price) unless edits are in progress.
   useEffect(() => { if (!editMode) setCalc(fromModel(model)); }, [model]);
 
@@ -131,7 +134,7 @@ export function ModelWorkspace({ model }: { model: UnderwritingDeal }) {
     },
   });
 
-  const updateCalc = useCallback((field: keyof FormValues, value: any) => {
+  const updateCalc = useCallback((field: keyof Calc, value: any) => {
     setCalc(prev => ({ ...prev, [field]: value }));
   }, []);
 
