@@ -42,6 +42,16 @@ GitHub, Resend or Anthropic's console as exact click paths.
 - `client/src/components/ProjectDocuments.tsx`: a project's document links, shown inside its card on the
   Projects page; links with no project show in "Company documents" below the cards. There is no separate
   Documents page (decided 2026-10-27): `/documents` redirects to `/projects`.
+- `client/src/pages/Properties.tsx` + `client/src/components/property/`: owned, operating properties (built
+  2026-11-02). Cards with T12 NOI, last month vs budget, occupancy; a workspace with Overview, Financials
+  (monthly actual / budget / variance by year) and Files. "Upload report" saves the file, Claude reads it
+  (`readOperatingReport()` in `server/claude.ts`, forced tool `record_operating_report`) into the standard
+  categories month by month, and `ReportReview.tsx` shows an editable table; nothing is saved until Save.
+  Routes in `server/api/properties.ts`. Categories, NOI and the summary math are in `shared/properties.ts`:
+  NOI is always computed from the lines (capex and debt service are below NOI) and months where it differs
+  from the report's own NOI (> $100 and > 0.5%) are flagged. Projects in lease-up, stabilized or disposition
+  get "Move to Properties" (`POST /api/projects/:id/property`), carrying over the deal's units, price and
+  closing date. Third-party managers send T12s, so one upload usually fills 12 months.
 - `client/src/components/ConfirmDialog.tsx`: `useConfirm()`; every delete must go through it.
 - `server/routes.ts`: wires up the API (order matters: auth first, then the guard, then each area).
   Routes live in `server/api/`: `auth.ts` (password, login limit, guard), `records.ts` (projects, backup,
@@ -134,7 +144,9 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
 - Key tables: `deals` (Pipeline; Drizzle export is named `pipeline`), `deal_activity`,
   `deal_files`, `deal_milestones`, `tasks` (has `deal_id` and `project_id`), `underwriting`
   (has `deal_id`), `projects`, `cash_flow`, `investors`, `documents` (links only), `contacts`,
-  `arm_loans`, `box_files` (one row per Box file handled, unique Box file id),
+  `arm_loans`, `box_files` (one row per Box file handled, unique Box file id), `properties`,
+  `property_months` (one row per property, month and kind actual|budget; `lines` is JSON by category),
+  `property_files` (separate from `deal_files`, whose unattached rows are cleaned up after a day),
   `app_state` (key/value: digest status, Box run status, DD checklist base dates, deal ID counters,
   pending Upload OM readings as `intake:<fileId>`).
 - `deals.needs_review` = 1 for deals the Box import created. It's left out of `insertPipelineSchema`, so
@@ -191,7 +203,8 @@ Variable names are exact (all caps, underscores). Variable changes take effect o
   project (`projects.deal_id`) via `syncProject()` in `server/deals.ts`. Closed moves it to planning; Dead or
   moving back before DD sets it to cancelled (never deleted); reviving reopens it. Deleting a deal
   keeps its project, unlinked. Project vocabulary and `projectFromDeal()` live in `shared/projects.ts`.
-  Owned, operating assets will become properties (not built yet).
+  A stabilized project becomes a property with "Move to Properties" (`properties.project_id`/`deal_id`);
+  owned properties can also be added directly. Deleting a property keeps its deal and project.
 
 ## Testing
 
@@ -234,5 +247,6 @@ There is no general test suite. What has worked:
 - Broker follow-up email drafts (draft only; send needs approval).
 - Closing checklist on moving to Closing.
 - Project budget vs. actual by line item, and construction draws.
-- Properties tab for owned assets (rent roll, leases, monthly reporting-package upload).
+- Properties, phase 2: rent roll and lease expirations (apartments and retail), loans and investors
+  linked to properties, property alerts in the morning email.
 - Separate logins per partner so the activity log shows who did what.

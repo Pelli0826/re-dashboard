@@ -5,7 +5,7 @@ import crypto from "crypto";
 import path from "path";
 import {
   projects, pipeline, dealActivity, dealFiles, dealMilestones, armLoans, cashFlow, contacts, investors, documents, tasks, underwriting,
-  boxFiles,
+  boxFiles, properties, propertyMonths, propertyFiles,
 } from "@shared/schema";
 import type {
   Project, InsertProject,
@@ -19,6 +19,7 @@ import type {
   Task, InsertTask,
   UnderwritingDeal, InsertUnderwriting,
   BoxFile,
+  Property, InsertProperty, PropertyMonth, PropertyFile,
 } from "@shared/schema";
 import { eq, desc, like } from "drizzle-orm";
 
@@ -146,6 +147,25 @@ sqlite.exec(`
     exit_cap_rate REAL NOT NULL DEFAULT 5.5, selling_costs REAL NOT NULL DEFAULT 2,
     preferred_return REAL NOT NULL DEFAULT 8, notes TEXT, value_add TEXT
   );
+  CREATE TABLE IF NOT EXISTS properties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '', type TEXT NOT NULL,
+    units INTEGER, sqft INTEGER, owner_entity TEXT, manager TEXT, manager_contact_id INTEGER,
+    acquired_date TEXT, purchase_price REAL, project_id INTEGER, deal_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'owned', notes TEXT, created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS property_months (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER NOT NULL, month TEXT NOT NULL, kind TEXT NOT NULL,
+    lines TEXT NOT NULL, reported_noi REAL, occupancy REAL, source_file_id INTEGER, updated_at TEXT NOT NULL,
+    UNIQUE (property_id, month, kind)
+  );
+  CREATE TABLE IF NOT EXISTS property_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER NOT NULL, name TEXT NOT NULL, stored_name TEXT NOT NULL,
+    mime TEXT NOT NULL, size INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'other', created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_property_files_property ON property_files(property_id);
   CREATE TABLE IF NOT EXISTS box_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     box_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, size INTEGER,
@@ -436,7 +456,7 @@ export class DatabaseStorage implements IStorage {
   // Full export of every table, for the Download backup button.
   exportAll() {
     const tables = ["projects", "deals", "deal_activity", "deal_files", "deal_milestones", "arm_loans", "cash_flow", "contacts",
-      "investors", "documents", "tasks", "underwriting", "box_files"];
+      "investors", "documents", "tasks", "underwriting", "box_files", "properties", "property_months", "property_files"];
     const out: Record<string, unknown[]> = {};
     for (const t of tables) out[t] = sqlite.prepare(`SELECT * FROM ${t}`).all();
     return out;
@@ -496,6 +516,66 @@ export class DatabaseStorage implements IStorage {
   createTask(data: InsertTask) { return db.insert(tasks).values(data).returning().get(); }
   updateTask(id: number, data: Partial<InsertTask>) { return db.update(tasks).set(data).where(eq(tasks.id, id)).returning().get(); }
   deleteTask(id: number) { db.delete(tasks).where(eq(tasks.id, id)).run(); }
+
+  // ── Properties ──
+  getProperties() { return db.select().from(properties).all(); }
+  getProperty(id: number) { return db.select().from(properties).where(eq(properties.id, id)).get(); }
+  createProperty(data: InsertProperty) {
+    return db.insert(properties).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+  updateProperty(id: number, data: Partial<InsertProperty>) {
+    return db.update(properties).set(data).where(eq(properties.id, id)).returning().get();
+  }
+  propertyRelatedCounts(id: number) {
+    const count = (sql: string) => (sqlite.prepare(sql).get(id) as { n: number }).n;
+    return {
+      months: count("SELECT COUNT(*) AS n FROM property_months WHERE property_id = ?"),
+      files: count("SELECT COUNT(*) AS n FROM property_files WHERE property_id = ?"),
+    };
+  }
+  // Deleting a property removes its monthly figures and files (also on disk). Its project and deal are kept.
+  deleteProperty(id: number) {
+    const files = db.select().from(propertyFiles).where(eq(propertyFiles.propertyId, id)).all();
+    sqlite.transaction(() => {
+      db.delete(propertyMonths).where(eq(propertyMonths.propertyId, id)).run();
+      db.delete(propertyFiles).where(eq(propertyFiles.propertyId, id)).run();
+      db.delete(properties).where(eq(properties.id, id)).run();
+    })();
+    for (const f of files) removeStoredFile(f.storedName);
+  }
+  getPropertyMonths(propertyId: number) {
+    return db.select().from(propertyMonths).where(eq(propertyMonths.propertyId, propertyId)).all();
+  }
+  getAllPropertyMonths() { return db.select().from(propertyMonths).all(); }
+  // Insert or replace one month (actual or budget).
+  savePropertyMonth(row: Omit<PropertyMonth, "id" | "updatedAt">): void {
+    sqlite.prepare(`INSERT INTO property_months (property_id, month, kind, lines, reported_noi, occupancy, source_file_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(property_id, month, kind) DO UPDATE SET lines = excluded.lines, reported_noi = excluded.reported_noi,
+        occupancy = excluded.occupancy, source_file_id = excluded.source_file_id, updated_at = excluded.updated_at`)
+      .run(row.propertyId, row.month, row.kind, row.lines, row.reportedNoi, row.occupancy, row.sourceFileId, new Date().toISOString());
+  }
+  deletePropertyMonth(propertyId: number, month: string, kind: string) {
+    sqlite.prepare("DELETE FROM property_months WHERE property_id = ? AND month = ? AND kind = ?").run(propertyId, month, kind);
+  }
+  savePropertyFile(buffer: Buffer, name: string, mime: string, propertyId: number, kind: string): PropertyFile {
+    const storedName = `${crypto.randomUUID()}${path.extname(name).toLowerCase().slice(0, 8)}`;
+    fs.writeFileSync(path.join(FILES_DIR, storedName), buffer);
+    return db.insert(propertyFiles).values({
+      propertyId, name: name.slice(0, 200), storedName, mime, size: buffer.length, kind, createdAt: new Date().toISOString(),
+    }).returning().get();
+  }
+  getPropertyFiles(propertyId: number) {
+    return db.select().from(propertyFiles).where(eq(propertyFiles.propertyId, propertyId)).orderBy(desc(propertyFiles.createdAt)).all();
+  }
+  getPropertyFile(id: number) { return db.select().from(propertyFiles).where(eq(propertyFiles.id, id)).get(); }
+  readPropertyFile(f: PropertyFile): Buffer { return fs.readFileSync(path.join(FILES_DIR, f.storedName)); }
+  deletePropertyFile(id: number) {
+    const f = this.getPropertyFile(id);
+    if (!f) return;
+    db.delete(propertyFiles).where(eq(propertyFiles.id, id)).run();
+    removeStoredFile(f.storedName);
+  }
 
   // Underwriting
   getUnderwritingDeals() { return db.select().from(underwriting).all(); }

@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/toaster";
 import Layout from "./components/Layout";
 import Overview from "./pages/Overview";
 import Projects from "./pages/Projects";
+import Properties from "./pages/Properties";
 import Pipeline from "./pages/Pipeline";
 import ARM from "./pages/ARM";
 import CashFlow from "./pages/CashFlow";
@@ -41,6 +42,7 @@ function AppInner() {
         <Switch>
           <Route path="/" component={Overview} />
           <Route path="/projects" component={Projects} />
+          <Route path="/properties" component={Properties} />
           <Route path="/pipeline" component={Pipeline} />
           <Route path="/arm" component={ARM} />
           <Route path="/cashflow" component={CashFlow} />

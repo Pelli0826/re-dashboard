@@ -9,6 +9,7 @@ import { registerUnderwritingRoutes } from "./api/underwriting";
 import { registerDealFileRoutes } from "./api/dealFiles";
 import { registerAskRoutes } from "./api/ask";
 import { registerIntegrationRoutes } from "./api/integrations";
+import { registerPropertyRoutes } from "./api/properties";
 
 // All API routes. Each area lives in server/api/; deal logic shared between them is in server/deals.ts.
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -23,6 +24,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   registerDealFileRoutes(app);
   registerAskRoutes(app);
   registerIntegrationRoutes(app);
+  registerPropertyRoutes(app);
   configureBoxImport({ createDeal });
 
   // Unknown API paths get a JSON 404 instead of falling through to the web app.

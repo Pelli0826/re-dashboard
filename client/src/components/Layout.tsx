@@ -5,13 +5,14 @@ import type { Task } from "@shared/schema";
 import {
   LayoutDashboard, FolderKanban, TrendingUp, BadgeDollarSign,
   LineChart, Users, UserCheck, CheckSquare,
-  ChevronLeft, ChevronRight, Sun, Moon, Building2, LogOut, Download, AlertTriangle
+  ChevronLeft, ChevronRight, Sun, Moon, Building, Building2, LogOut, Download, AlertTriangle
 } from "lucide-react";
 import PerplexityAttribution from "./PerplexityAttribution";
 
 const navItems = [
   { href: "/", icon: LayoutDashboard, label: "Overview" },
   { href: "/projects", icon: FolderKanban, label: "Projects" },
+  { href: "/properties", icon: Building, label: "Properties" },
   { href: "/pipeline", icon: TrendingUp, label: "Pipeline" },
   { href: "/arm", icon: BadgeDollarSign, label: "ARM Loans" },
   { href: "/cashflow", icon: LineChart, label: "Cash Flow" },

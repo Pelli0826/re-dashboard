@@ -313,3 +313,54 @@ export const boxFiles = sqliteTable("box_files", {
   processedAt: text("processed_at").notNull(), // ISO timestamp
 });
 export type BoxFile = typeof boxFiles.$inferSelect;
+
+// ─── Properties (owned, operating assets) ─────────────────────────────────
+// The last step of deal → project → property. Monthly figures come from the manager's reports.
+export const properties = sqliteTable("properties", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  address: text("address").notNull().default(""),
+  type: text("type").notNull(),                       // apartments | retail | mixed (shared/properties.ts)
+  units: integer("units"),
+  sqft: integer("sqft"),
+  ownerEntity: text("owner_entity"),                  // e.g. "DP Berwyn LLC"
+  manager: text("manager"),                           // management company
+  managerContactId: integer("manager_contact_id"),
+  acquiredDate: text("acquired_date"),                // YYYY-MM-DD
+  purchasePrice: real("purchase_price"),
+  projectId: integer("project_id"),                   // project it came from, if any
+  dealId: integer("deal_id"),                         // pipeline deal it came from, if any
+  status: text("status").notNull().default("owned"),  // owned | sold
+  notes: text("notes"),
+  createdAt: text("created_at").notNull(),
+});
+export const insertPropertySchema = createInsertSchema(properties).omit({ id: true, createdAt: true });
+export type InsertProperty = z.infer<typeof insertPropertySchema>;
+export type Property = typeof properties.$inferSelect;
+
+// One row per property, month and kind (actual or budget). Lines are amounts by category
+// (shared/properties.ts); NOI is always computed from them in code.
+export const propertyMonths = sqliteTable("property_months", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  propertyId: integer("property_id").notNull(),
+  month: text("month").notNull(),                     // YYYY-MM
+  kind: text("kind").notNull(),                       // actual | budget
+  lines: text("lines").notNull(),                     // JSON { category: amount }
+  reportedNoi: real("reported_noi"),                  // NOI printed on the report, for the check
+  occupancy: real("occupancy"),                       // % physical, if the report shows it
+  sourceFileId: integer("source_file_id"),
+  updatedAt: text("updated_at").notNull(),
+});
+export type PropertyMonth = typeof propertyMonths.$inferSelect;
+
+export const propertyFiles = sqliteTable("property_files", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  propertyId: integer("property_id").notNull(),
+  name: text("name").notNull(),
+  storedName: text("stored_name").notNull(),
+  mime: text("mime").notNull(),
+  size: integer("size").notNull(),
+  kind: text("kind").notNull().default("other"),      // report | budget | other
+  createdAt: text("created_at").notNull(),
+});
+export type PropertyFile = typeof propertyFiles.$inferSelect;

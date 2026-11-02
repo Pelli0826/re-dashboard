@@ -2,6 +2,7 @@
 // Uses plain fetch, so no extra npm package is needed.
 // Requires ANTHROPIC_API_KEY. Optional: ANTHROPIC_MODEL (default below).
 import { DEAL_TYPES } from "@shared/pipeline";
+import { ALL_LINES } from "@shared/properties";
 import type { OmAnalysis } from "@shared/intake";
 export type { OmAnalysis };
 
@@ -242,6 +243,75 @@ export async function claudeJsonFromText(name: string, text: string, prompt: str
   try { return JSON.parse(json || "{}"); } catch {
     throw new Error("Claude's reply wasn't in the expected format. Try again.");
   }
+}
+
+// ── Property operating reports (T12, monthly P&L, budget) ─────────────────
+// Claude maps the manager's accounts into the standard categories (shared/properties.ts) month by
+// month. NOI is not asked for as a result: the dashboard computes it and compares it with reportedNoi.
+const lineProps = Object.fromEntries(ALL_LINES.map(l => [l.key, { type: ["number", "null"], description: `${l.label}${l.help ? ` (${l.help})` : ""}` }]));
+const REPORT_TOOL: ToolDef = {
+  name: "record_operating_report",
+  description: "Record a property operating report (actual results or a budget), one entry per month, with every account mapped into the standard categories.",
+  input_schema: {
+    type: "object",
+    properties: {
+      propertyName: { type: ["string", "null"] },
+      kind: { type: "string", enum: ["actual", "budget"], description: "budget if the document is a budget or forecast; actual for results (T12, P&L, operating statement)" },
+      months: {
+        type: "array",
+        description: "One entry per calendar month shown as its own column. Skip total, YTD and annual columns.",
+        items: {
+          type: "object",
+          properties: {
+            month: { type: "string", description: "YYYY-MM" },
+            lines: { type: "object", properties: lineProps, description: "Amounts for this month in dollars. Income and expenses as positive numbers." },
+            reportedNoi: { type: ["number", "null"], description: "The NOI line printed for this month, exactly as shown (null if none)" },
+            occupancy: { type: ["number", "null"], description: "Physical occupancy % for this month if shown" },
+          },
+          required: ["month", "lines"],
+        },
+      },
+      notes: { type: ["string", "null"], description: "Anything mapped with judgment, or lines left out, in one or two sentences" },
+    },
+    required: ["kind", "months"],
+  },
+};
+
+const REPORT_PROMPT = `This is a property's operating report from its manager (for example a 12-month trending income statement, a monthly P&L, or an annual budget by month).
+
+Map every income and expense account into the categories of the record_operating_report tool, one entry per month column:
+- rentalIncome is rent actually earned: gross potential rent less vacancy, loss to lease, concessions, model/employee units and bad debt. If the report only shows gross rent and separate vacancy/concession lines, subtract them.
+- reimbursements are tenant recoveries (CAM, real estate tax, insurance) for commercial tenants.
+- Expenses are positive amounts. Put make-ready, turnover and contract services in repairs.
+- capex and debtService are below NOI: capital improvements, replacements, mortgage interest and principal. Never include them in operating expenses. Depreciation and amortization go nowhere.
+- Leave a category null when the report has nothing for it. Do not invent numbers.
+- reportedNoi is the report's own Net Operating Income line for that month, if it has one.
+- Skip total, year-to-date and annual columns; record only individual months.`;
+
+export async function readOperatingReport(file: { name: string; pdf?: Buffer; text?: string }): Promise<{
+  propertyName: string | null; kind: "actual" | "budget"; notes: string | null;
+  months: { month: string; lines: Record<string, number | null>; reportedNoi: number | null; occupancy: number | null }[];
+}> {
+  if (file.pdf) checkSize(file.pdf);
+  const content = file.pdf
+    ? [pdfBlock(file.pdf), { type: "text", text: REPORT_PROMPT }]
+    : [{ type: "text", text: `File: ${file.name}\n\n${(file.text ?? "").slice(0, 400_000)}` }, { type: "text", text: REPORT_PROMPT }];
+  const data = await postMessages({
+    max_tokens: 12000,
+    messages: [{ role: "user", content }],
+    tools: [REPORT_TOOL],
+    tool_choice: { type: "tool", name: REPORT_TOOL.name },
+  });
+  if (data.stop_reason === "max_tokens") throw new Error("The report has more months than can be read at once. Upload one year at a time.");
+  const block = (data.content ?? []).find((b: any) => b.type === "tool_use");
+  if (!block) throw new Error("Claude did not return structured results. Try again.");
+  const out = block.input ?? {};
+  return {
+    propertyName: out.propertyName ?? null,
+    kind: out.kind === "budget" ? "budget" : "actual",
+    notes: out.notes ?? null,
+    months: Array.isArray(out.months) ? out.months : [],
+  };
 }
 
 // ── Full OM intake: property facts + screening notes ─────────────────────

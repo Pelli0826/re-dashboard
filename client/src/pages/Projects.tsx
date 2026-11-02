@@ -2,17 +2,18 @@ import { useState } from "react";
 import { useConfirm, plural } from "@/components/ConfirmDialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { Project, InsertProject, PipelineDeal, DealMilestone, Task } from "@shared/schema";
+import type { Project, InsertProject, PipelineDeal, DealMilestone, Task, Property } from "@shared/schema";
 import { PROJECT_STATUSES, PROJECT_STATUS_LABELS } from "@shared/projects";
 import { STAGE_LABELS, type Stage } from "@shared/pipeline";
 import { OPEN_DEAL_KEY } from "./Pipeline";
 import { ProjectDocuments } from "@/components/ProjectDocuments";
+import { OPEN_PROPERTY_KEY } from "./Properties";
 import { useLocation } from "wouter";
 import { insertProjectSchema } from "@shared/schema";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Plus, Pencil, Trash2, Loader2, X, Flag, ListChecks, ExternalLink } from "lucide-react";
+import { Plus, Pencil, Trash2, Loader2, X, Flag, ListChecks, ExternalLink, Building } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -96,6 +97,18 @@ export default function Projects() {
   const { data: deals = [] } = useQuery<PipelineDeal[]>({ queryKey: ["/api/pipeline"] });
   const { data: milestones = [] } = useQuery<DealMilestone[]>({ queryKey: ["/api/milestones"] });
   const { data: tasks = [] } = useQuery<Task[]>({ queryKey: ["/api/tasks"] });
+  const { data: properties = [] } = useQuery<Property[]>({ queryKey: ["/api/properties"] });
+  const [, navigate] = useLocation();
+  const openProperty = (id: number) => {
+    try { sessionStorage.setItem(OPEN_PROPERTY_KEY, String(id)); } catch { /* storage unavailable */ }
+    navigate("/properties");
+  };
+  // A stabilized project becomes an owned property (its deal, units and price carry over).
+  const toProperty = useMutation({
+    mutationFn: async (id: number) => (await apiRequest("POST", `/api/projects/${id}/property`)).json() as Promise<Property>,
+    onSuccess: p => { qc.invalidateQueries({ queryKey: ["/api/properties"] }); toast({ title: `${p.name} moved to Properties` }); openProperty(p.id); },
+    onError: (e: Error) => toast({ title: "Could not move to Properties", description: e.message.replace(/^\d+:\s*/, ""), variant: "destructive" }),
+  });
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -242,6 +255,20 @@ export default function Projects() {
                   </div>
                 </div>
                 {deal && <FromDeal deal={deal} milestones={milestones} tasks={tasks} />}
+                {(() => {
+                  const prop = properties.find(x => x.projectId === p.id);
+                  if (prop) return (
+                    <button onClick={() => openProperty(prop.id)} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+                      <Building size={12} /> Owned property: {prop.name}
+                    </button>
+                  );
+                  if (["lease-up", "stabilized", "disposition"].includes(p.status)) return (
+                    <Button size="sm" variant="outline" className="gap-1 h-7 text-xs" disabled={toProperty.isPending} onClick={() => toProperty.mutate(p.id)}>
+                      <Building size={12} /> Move to Properties
+                    </Button>
+                  );
+                  return null;
+                })()}
                 <ProjectDocuments projectId={p.id} projects={projects} />
                 {p.notes && <p className="text-xs text-muted-foreground italic">{p.notes}</p>}
               </CardContent>
